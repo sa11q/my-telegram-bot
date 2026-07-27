@@ -1,6 +1,6 @@
 import telebot
 
-TOKEN = '8876079721:AAEsmS1IbFBtp-t-OCMu8Q7LwapolDOviVk'
+TOKEN = '8876079721:AAGYATTQ8WHwrlYB5l_rTa6knvskCyVSfc0'
 bot = telebot.TeleBot(TOKEN)
 
 # Формат: { thread_id: set("@user1", "@user2") }
