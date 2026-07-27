@@ -9,7 +9,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 # Настройка логирования
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-TOKEN = "8876079721:AAGrdHpZdta93TRUQBwLgcJLmIsCwiAfUKE"
+TOKEN = "8876079721:AAH8dJTuvKNVHuMNzdG_M79Xp5vkAZ5wO_I"
 bot = telebot.TeleBot(TOKEN)
 
 # Список админов
