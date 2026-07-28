@@ -1,142 +1,398 @@
-import os
-import sys
-import time
-import logging
-import telebot
+import asyncio
+import signal
 
-# =====================================================================
-# КОНФИГУРАЦИЯ И ПУТИ
-# =====================================================================
-# Определяем абсолютный путь к директории, где лежит bot.py.
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-LOGS_DIR = os.path.join(BASE_DIR, "logs")
+from telebot.async_telebot import AsyncTeleBot
+from telebot import asyncio_filters
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-# Автоматически создаем папку для логов, если её не существует
-os.makedirs(LOGS_DIR, exist_ok=True)
+from config import config
 
-# Константы для задержек и таймаутов
-RESTART_DELAY_SECONDS = 5
-POLLING_TIMEOUT = 20
-LONG_POLLING_TIMEOUT = 10
+from database.database import get_repository
+from database.postgres import PostgresRepository
 
-# =====================================================================
-# НАСТРОЙКА ЛОГИРОВАНИЯ
-# =====================================================================
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - [%(levelname)s] - %(name)s - %(message)s",
-    handlers=[
-        logging.FileHandler(os.path.join(LOGS_DIR, "bot.log"), encoding="utf-8"),
-        logging.StreamHandler(sys.stdout)
-    ]
+from redis.redis_storage import RedisStorage
+
+from services.elo_service import EloService
+from services.user_service import UserService
+from services.ranking_service import RankingService
+from services.tournament_service import TournamentService
+from services.bracket_service import BracketService
+from services.swiss_service import SwissService
+from services.match_service import MatchService
+from services.result_service import ResultService
+from services.dispute_service import DisputeService
+from services.reminder_service import ReminderService
+
+from utils.logger import bot_logger, error_logger
+from utils.error_handler import GlobalErrorHandler
+from utils.middlewares import AuthMiddleware
+
+
+# ==================================================
+# BOT CORE
+# ==================================================
+
+bot = AsyncTeleBot(
+    config.BOT_TOKEN,
+    parse_mode="HTML"
 )
-logger = logging.getLogger(__name__)
 
-# =====================================================================
-# ИНИЦИАЛИЗАЦИЯ БОТА
-# =====================================================================
-TOKEN = "8876079721:AAFMECzB5jkywB1J8ks66qgXg_YMzDMD6dU"
-bot = telebot.TeleBot(TOKEN, parse_mode=None)
 
-# =====================================================================
-# ПОДКЛЮЧЕНИЕ ОБРАБОТЧИКОВ (HANDLERS)
-# =====================================================================
-_MODULES_IMPORTED = False
-_HANDLERS_REGISTERED = False
+scheduler = AsyncIOScheduler()
 
-try:
-    from handlers.results import register_results_handlers
-    from handlers.players import register_players_handlers
-    from handlers.profile import register_profile_handlers
-    from handlers.stats import register_stats_handlers
-    from handlers.tournament import register_tournament_handlers
+
+# ==================================================
+# DEPENDENCY CONTAINER
+# ==================================================
+
+class Container:
+
+    database = None
+    redis = None
+
+    users = None
+    tournament = None
+    bracket = None
+    swiss = None
+    matches = None
+    results = None
+    disputes = None
+    ranking = None
+    elo = None
+    reminders = None
+
+
+services = Container()
+
+
+
+# ==================================================
+# DATABASE
+# ==================================================
+
+async def setup_database():
+
+    if config.DB_TYPE.lower() == "postgres":
+
+        services.database = PostgresRepository(
+            config.POSTGRES_URL
+        )
+
+        await services.database.connect()
+
+        bot_logger.info(
+            "PostgreSQL connected"
+        )
+
+
+    else:
+
+        services.database = get_repository(
+            "json",
+            config.JSON_DB_PATH
+        )
+
+        bot_logger.info(
+            "JSON database enabled"
+        )
+
+
+
+# ==================================================
+# REDIS
+# ==================================================
+
+async def setup_redis():
+
+    services.redis = RedisStorage(
+        config.REDIS_HOST,
+        config.REDIS_PORT,
+        config.REDIS_DB
+    )
+
+    bot_logger.info(
+        "Redis initialized"
+    )
+
+
+
+# ==================================================
+# SERVICES
+# ==================================================
+
+def setup_services():
+
+    services.elo = EloService()
+
+
+    services.users = UserService(
+        services.database
+    )
+
+
+    services.ranking = RankingService(
+        services.database,
+        services.elo
+    )
+
+
+    services.bracket = BracketService(
+        services.database
+    )
+
+
+    services.swiss = SwissService(
+        services.database
+    )
+
+
+    services.tournament = TournamentService(
+        services.database,
+        services.bracket,
+        services.swiss
+    )
+
+
+    services.matches = MatchService(
+        services.database,
+        services.ranking,
+        services.bracket
+    )
+
+
+    services.results = ResultService(
+        services.matches
+    )
+
+
+    services.disputes = DisputeService(
+        services.database
+    )
+
+
+    services.reminders = ReminderService(
+        bot,
+        services.database
+    )
+
+
+    bot_logger.info(
+        "Services initialized"
+    )
+
+
+
+# ==================================================
+# HANDLERS
+# ==================================================
+
+def setup_handlers():
+
     from handlers.admin import register_admin_handlers
-    
-    _MODULES_IMPORTED = True
-except ImportError as e:
-    logger.error(f"Ошибка импорта модулей обработчиков: {e}")
-    logger.info("Убедитесь, что все файлы в папке handlers созданы.")
+    from handlers.players import register_player_handlers
+    from handlers.tournaments import register_tournament_handlers
+    from handlers.matches import register_match_handlers
+    from handlers.callbacks import register_callback_handlers
+    from handlers.disputes import register_dispute_handlers
+    from handlers.rankings import register_ranking_handlers
 
-def register_all_handlers(telebot_instance: telebot.TeleBot) -> None:
-    """
-    Регистрирует все обработчики сообщений и callback-ов.
-    Защищена от повторного вызова.
-    """
-    global _HANDLERS_REGISTERED
-    
-    if _HANDLERS_REGISTERED:
-        logger.warning("Обработчики уже зарегистрированы. Пропуск повторной регистрации.")
-        return
 
-    logger.info("Начало регистрации обработчиков (handlers)...")
-    
+    register_admin_handlers(
+        bot,
+        services
+    )
+
+
+    register_player_handlers(
+        bot,
+        services
+    )
+
+
+    register_tournament_handlers(
+        bot,
+        services
+    )
+
+
+    register_match_handlers(
+        bot,
+        services
+    )
+
+
+    register_callback_handlers(
+        bot,
+        services
+    )
+
+
+    register_dispute_handlers(
+        bot,
+        services
+    )
+
+
+    register_ranking_handlers(
+        bot,
+        services
+    )
+
+
+    bot_logger.info(
+        "Handlers loaded"
+    )
+
+
+
+# ==================================================
+# MIDDLEWARE + FILTERS
+# ==================================================
+
+def setup_middlewares():
+
+
+    bot.setup_middleware(
+        AuthMiddleware()
+    )
+
+
+    bot.add_custom_filter(
+        asyncio_filters.StateFilter(bot)
+    )
+
+
+    bot_logger.info(
+        "Middlewares loaded"
+    )
+
+
+
+# ==================================================
+# TASKS
+# ==================================================
+
+def setup_scheduler():
+
+    scheduler.add_job(
+        services.reminders.check_deadlines,
+        "interval",
+        seconds=60
+    )
+
+
+    scheduler.start()
+
+
+    bot_logger.info(
+        "Scheduler started"
+    )
+
+
+
+# ==================================================
+# STARTUP
+# ==================================================
+
+async def startup():
+
+    bot.exception_handler = GlobalErrorHandler(
+        bot
+    )
+
+
+    await setup_database()
+
+    await setup_redis()
+
+    setup_services()
+
+    setup_middlewares()
+
+    setup_handlers()
+
+    setup_scheduler()
+
+
+    bot_logger.info(
+        "🔥 Tournament Engine ONLINE"
+    )
+
+
+
+# ==================================================
+# SHUTDOWN
+# ==================================================
+
+async def shutdown():
+
+    bot_logger.info(
+        "Shutdown started"
+    )
+
+
+    scheduler.shutdown(
+        wait=False
+    )
+
+
+    if services.redis:
+
+        await services.redis.close()
+
+
+    if isinstance(
+        services.database,
+        PostgresRepository
+    ):
+
+        await services.database.disconnect()
+
+
+    bot_logger.info(
+        "Shutdown completed"
+    )
+
+
+
+# ==================================================
+# MAIN
+# ==================================================
+
+async def main():
+
+    await startup()
+
+
     try:
-        register_results_handlers(telebot_instance)
-        register_players_handlers(telebot_instance)
-        register_profile_handlers(telebot_instance)
-        register_stats_handlers(telebot_instance)
-        register_tournament_handlers(telebot_instance)
-        register_admin_handlers(telebot_instance)
-        
-        _HANDLERS_REGISTERED = True
-        
-        registered_modules = [
-            "handlers.results", 
-            "handlers.players", 
-            "handlers.profile",
-            "handlers.stats", 
-            "handlers.tournament", 
-            "handlers.admin"
-        ]
-        logger.info(f"Все модули успешно зарегистрированы: {', '.join(registered_modules)}")
-    except NameError as e:
-        logger.error(f"Не удалось зарегистрировать обработчики из-за ошибки импорта: {e}")
 
-# =====================================================================
-# ЗАПУСК ПРИЛОЖЕНИЯ
-# =====================================================================
-def main():
-    logger.info("===================================================")
-    logger.info("=== Запуск приложения турнирного бота ===")
-    logger.info(f"=== Время запуска: {time.strftime('%Y-%m-%d %H:%M:%S')} ===")
-    logger.info(f"=== Версия Python: {sys.version.split(' ')[0]} ===")
-    logger.info("===================================================")
-    
-    # 1. Проверка успешности импорта модулей
-    if not _MODULES_IMPORTED:
-        logger.critical("КРИТИЧЕСКАЯ ОШИБКА: Не все модули были импортированы. Остановка запуска.")
-        sys.exit(1)
-        
-    # 2. Проверка токена и доступности серверов Telegram
-    logger.info("Проверка токена и подключения к Telegram...")
+        await bot.polling(
+            non_stop=True,
+            request_timeout=120
+        )
+
+
+    except Exception as error:
+
+        error_logger.exception(
+            error
+        )
+
+
+    finally:
+
+        await shutdown()
+
+
+
+if __name__ == "__main__":
+
     try:
-        bot_info = bot.get_me()
-        logger.info(f"Подключение успешно! Бот авторизован как: @{bot_info.username} (ID: {bot_info.id})")
-    except telebot.apihelper.ApiTelegramException as e:
-        logger.critical(f"Ошибка API Telegram (возможно, неверный токен): {e}")
-        sys.exit(1)
-    except Exception as e:
-        logger.critical(f"Не удалось подключиться к серверам Telegram: {e}", exc_info=True)
-        sys.exit(1)
-    
-    # 3. Регистрация обработчиков
-    register_all_handlers(bot)
-    
-    logger.info("Старт polling. Бот готов к приему сообщений...")
-    
-    # 4. Основной цикл polling с обработкой прерываний и ошибок
-    while True:
-        try:
-            bot.infinity_polling(timeout=POLLING_TIMEOUT, long_polling_timeout=LONG_POLLING_TIMEOUT)
-        except KeyboardInterrupt:
-            # Корректное завершение при нажатии Ctrl+C
-            logger.info("Получен сигнал остановки (KeyboardInterrupt). Завершение работы...")
-            sys.exit(0)
-        except Exception as e:
-            logger.error(f"Произошла непредвиденная ошибка в polling: {e}", exc_info=True)
-            logger.info(f"Перезапуск polling через {RESTART_DELAY_SECONDS} секунд...")
-            time.sleep(RESTART_DELAY_SECONDS)
 
-if __name__ == '__main__':
-    main()
+        asyncio.run(
+            main()
+        )
 
+    except KeyboardInterrupt:
+
+        pass
