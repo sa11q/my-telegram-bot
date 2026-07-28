@@ -57,10 +57,11 @@ def is_admin(message):
     return False
 
 def get_thread_id(message):
-    if message.message_thread_id:
-        return message.message_thread_id
+    """Привязка идет к ID поста, реплая или топика"""
     if message.reply_to_message:
         return message.reply_to_message.message_id
+    if message.message_thread_id:
+        return message.message_thread_id
     return message.chat.id
 
 def calculate_elo(rating1, rating2, score1, score2):
@@ -82,16 +83,14 @@ def init_player(username):
         }
 
 def process_match_result(p1, p2, s1, s2):
-    """Единая функция обновления статистики матча между игроками в активной сетке"""
     for m in active_tour["matches"]:
-        # Ищем совпадение по игрокам (в любом порядке)
         match_p1 = m["p1"].replace('@', '').lower()
         match_p2 = m["p2"].replace('@', '').lower()
         target_p1 = p1.replace('@', '').lower()
         target_p2 = p2.replace('@', '').lower()
 
         if (match_p1 == target_p1 and match_p2 == target_p2) or (match_p1 == target_p2 and match_p2 == target_p1):
-            if match_p1 == target_p2: # если порядок поменяли местами, свапаем счета
+            if match_p1 == target_p2:
                 s1, s2 = s2, s1
             
             m["s1"], m["s2"], m["done"] = s1, s2, True
@@ -115,29 +114,98 @@ def process_match_result(p1, p2, s1, s2):
             return True
     return False
 
-# ================= КОМАНДЫ БОТА =================
+# ================= АДМИНСКИЙ СБОР ЧЕРЕЗ /collect =================
+
+@bot.message_handler(commands=['collect'])
+def admin_collect_players(message):
+    try:
+        if not is_admin(message):
+            bot.reply_to(message, "⛔️ Команда `/collect` доступна только администраторам.")
+            return
+
+        if not message.reply_to_message:
+            bot.reply_to(message, "⚠️ Эту команду нужно отправлять **в ответ (реплаем)** на пост-анонс турнира, под которым игроки оставляли свои юзернеймы!")
+            return
+
+        thread_id = get_thread_id(message)
+        if thread_id not in posts_data:
+            posts_data[thread_id] = set()
+
+        # Сканируем текст самого сообщения, на которое ответили, плюс пытаемся вытащить юзернеймы
+        # Если игроки писали в комментариях к посту (в режиме обсуждений) или прямо в посте:
+        target_msg = message.reply_to_message
+        collected_usernames = set()
+
+        # Ищем юзернеймы в тексте самого поста-анонса
+        if target_msg.text:
+            found = re.findall(r'(@[a-zA-Z0-9_]+)', target_msg.text)
+            for u in found:
+                collected_usernames.add(u)
+
+        # Добавляем в список
+        added_count = 0
+        for username in collected_usernames:
+            if username not in posts_data[thread_id]:
+                posts_data[thread_id].add(username)
+                added_count += 1
+
+        save_data
+        save_data()
+        
+        total = len(posts_data[thread_id])
+        bot.reply_to(
+            message, 
+            f"✅ Сбор завершен!\n"
+            f"➕ Добавлено новых: {added_count}\n"
+            f"👥 Всего участников в списке этого поста: {total}\n\n"
+            f"Проверить список можно командой `/list`."
+        )
+    except Exception as e:
+        logging.error(f"Collect error: {e}")
+        bot.reply_to(message, "❌ Произошла ошибка при сборе участников.")
+
+@bot.message_handler(commands=['list', 'players', 'участники'])
+def show_collected_list(message):
+    try:
+        thread_id = get_thread_id(message)
+        participants = list(posts_data.get(thread_id, set()))
+        
+        if not participants:
+            bot.reply_to(message, "📭 Под этим постом/веткой еще нет собранных участников. Админ должен использовать `/collect` в ответ на пост.")
+            return
+
+        participants.sort()
+        msg = f"📋 Список участников ({len(participants)} чел.):\n\n"
+        for i, p in enumerate(participants, 1):
+            msg += f"{i}. {p}\n"
+        
+        bot.reply_to(message, msg)
+    except Exception as e:
+        logging.error(f"List error: {e}")
+
+# ================= СТАРТ И ЖЕРЕБЬЕВКА =================
 
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
     try:
         bot.reply_to(
             message, 
-            "✅ Бот запущен (Active Tournament Engine)\n\n"
+            "✅ Бот запущен (Tournament System)\n\n"
             "👤 ИГРОКАМ:\n"
             "• `/profile` — твой турнирный паспорт\n"
-            "• `/vs` — найти своего текущего соперника\n"
-            "• Напиши счет (например: 3:1), чтобы бот его засчитал!\n\n"
+            "• `/vs` — найти текущего соперника\n"
+            "• `/list` — посмотреть список участников\n"
+            "• Напиши счет матча (например: `3:1`), чтобы бот засчитал его!\n\n"
             "👑 АДМИНАМ:\n"
-            "• `/draw [режим]` — создать сетку (соло/дуо/трио/4-4)\n"
-            "• `/results [текст]` — принудительно ввести/исправить счета матчей\n"
-            "• `/next` — завершить этап и создать новую сетку победителей\n"
-            "• `/tp @username` — дать тех. поражение 6:0\n"
+            "• `/collect` (реплаем на пост) — собрать юзернеймы из поста\n"
+            "• `/draw [режим]` — сделать жеребьевку (соло/дуо/трио/4-4)\n"
+            "• `/results [текст]` — прописать счета вручную\n"
+            "• `/next` — перейти к следующему этапу плей-офф\n"
+            "• `/tp @username` — тех. поражение (0:6)\n"
             "• `/top` и `/stats` — статистика\n"
         )
     except Exception as e:
         logging.error(e)
-
-# ================= ЖЕРЕБЬЕВКА =================
 
 @bot.message_handler(commands=['draw'])
 def make_draw(message):
@@ -147,7 +215,7 @@ def make_draw(message):
         thread_id = get_thread_id(message)
         collected = list(posts_data.get(thread_id, set()))
         if not collected:
-            bot.reply_to(message, "📭 Участников не найдено. Начните регистрацию.")
+            bot.reply_to(message, "📭 Список участников пуст. Сначала админ должен ответить на пост командой `/collect`.")
             return
 
         args = message.text.lower().split()[1:]
@@ -168,7 +236,7 @@ def make_draw(message):
         total_teams = total_available // team_size
 
         if total_teams < 2:
-            bot.reply_to(message, f"⚠️ Недостаточно участников для {mode}. Нужно минимум {team_size * 2} чел.")
+            bot.reply_to(message, f"⚠️ Недостаточно участников для режима {mode.upper()}. Нужно минимум {team_size * 2} чел., а найдено {len(collected)}.")
             return
 
         playoff_teams_count = 2 ** int(math.log2(total_teams))
@@ -183,14 +251,14 @@ def make_draw(message):
         else:
             for i in range(0, len(active_players), team_size):
                 teams.append(active_players[i:i+team_size])
-                t_name = f"Команда {len(teams)}"
+                t_name = f"Команда {len(teams) + 1}"
                 team_names.append(t_name)
                 tour_stats["teams"][t_name] = teams[-1]
 
         active_tour["teams"] = team_names
         active_tour["matches"] = []
         
-        msg = f"🏆 СЕТКА ({mode.upper()})\n\n"
+        msg = f"🏆 ТУРНИРНАЯ СЕТКА ({mode.upper()})\n\n"
         
         for i in range(0, len(team_names), 2):
             t1_name, t2_name = team_names[i], team_names[i+1]
@@ -216,7 +284,7 @@ def make_draw(message):
     except Exception as e:
         logging.error(f"Draw error: {e}")
 
-# ================= РУЧНОЙ ВВОД РЕЗУЛЬТАТОВ АДМИНОМ (/results) =================
+# ================= РЕЗУЛЬТАТЫ И ПЛЕЙ-ОФФ =================
 
 @bot.message_handler(commands=['results'])
 def process_admin_results(message):
@@ -227,7 +295,6 @@ def process_admin_results(message):
             bot.reply_to(message, "⚠️ Введите результаты после команды /results\nПример:\n@player1 3:1 @player2")
             return
 
-        # Ищем все пары вида @user1 СЧЕТ:СЧЕТ @user2
         matches_found = re.findall(r'(@[a-zA-Z0-9_]+)\s*(\d+)\s*:\s*(\d+)\s*(@[a-zA-Z0-9_]+)', text)
         if not matches_found:
             bot.reply_to(message, "❌ Не удалось распознать формат. Пример: @user1 3:1 @user2")
@@ -242,8 +309,6 @@ def process_admin_results(message):
     except Exception as e:
         logging.error(f"Results error: {e}")
         bot.reply_to(message, "❌ Ошибка при обработке результатов.")
-
-# ================= ДВИЖЕНИЕ ПО СЕТКЕ =================
 
 @bot.message_handler(commands=['next'])
 def next_stage(message):
@@ -317,54 +382,49 @@ def next_stage(message):
     except Exception as e:
         logging.error(e)
 
-# ================= АВТОМАТИЧЕСКИЙ РЕГИСТРАТОР СЧЕТА (ОТ ИГРОКОВ) =================
-
 @bot.message_handler(func=lambda m: bool(re.search(r'\b(\d+)\s*:\s*(\d+)\b', str(m.text))))
 def auto_score(message):
     try:
+        if not message.from_user or not message.from_user.username: return
         if message.text.startswith('/'): return
-        username = message.from_user.username
-        if not username: return
-        clean_user = username.lower()
+        username = message.from_user.username.lower()
+
+        score_match = re.search(r'\b(\d+)\s*:\s*(\d+)\b', message.text)
+        if not score_match: return
+        sc1, sc2 = int(score_match.group(1)), int(score_match.group(2))
+        
+        if sc1 > 30 or sc2 > 30: return
 
         for m in active_tour["matches"]:
             if not m["done"]:
                 p1_clean = m["p1"].replace('@', '').lower()
                 p2_clean = m["p2"].replace('@', '').lower()
 
-                score_match = re.search(r'\b(\d+)\s*:\s*(\d+)\b', message.text)
-                sc1, sc2 = int(score_match.group(1)), int(score_match.group(2))
-
-                if p1_clean == clean_user:
+                if p1_clean == username:
                     process_match_result(m["p1"], m["p2"], sc1, sc2)
                     bot.reply_to(message, f"✅ Итог принят: {m['p1']} {sc1}:{sc2} {m['p2']}")
                     return
-                elif p2_clean == clean_user:
-                    process_match_result(m["p1"], m["p2"], sc2, sc1) # меняем местами, так как писал второй игрок
+                elif p2_clean == username:
+                    process_match_result(m["p1"], m["p2"], sc2, sc1)
                     bot.reply_to(message, f"✅ Итог принят: {m['p1']} {sc2}:{sc1} {m['p2']}")
                     return
     except Exception as e:
         logging.error(e)
 
-# ================= ПОИСК СОПЕРНИКА =================
-
 @bot.message_handler(commands=['vs', 'opponent', 'соперник'])
 def find_opponent(message):
-    username = message.from_user.username
-    if not username: return
-    clean_user = username.lower()
+    if not message.from_user or not message.from_user.username: return
+    username = message.from_user.username.lower()
 
     for m in active_tour["matches"]:
         if not m["done"]:
-            if m["p1"].replace('@', '').lower() == clean_user:
+            if m["p1"].replace('@', '').lower() == username:
                 bot.reply_to(message, f"⚔️ Твой соперник: {m['p2']} (от {m['t2']})")
                 return
-            elif m["p2"].replace('@', '').lower() == clean_user:
+            elif m["p2"].replace('@', '').lower() == username:
                 bot.reply_to(message, f"⚔️ Твой соперник: {m['p1']} (от {m['t1']})")
                 return
     bot.reply_to(message, "📭 У тебя нет активных матчей.")
-
-# ================= ПРОФИЛЬ ИГРОКА =================
 
 @bot.message_handler(commands=['profile', 'профиль'])
 def show_profile(message):
@@ -394,8 +454,6 @@ def show_profile(message):
             f"🔥 Разница мячей: {diff_str}")
     bot.reply_to(message, text)
 
-# ================= ТЕХНИЧЕСКОЕ ПОРАЖЕНИЕ =================
-
 @bot.message_handler(commands=['tp'])
 def tech_defeat(message):
     if not is_admin(message): return
@@ -414,8 +472,6 @@ def tech_defeat(message):
                 bot.reply_to(message, f"🔨 Тех. поражение. {m['p1']} 6:0 {m['p2']}")
                 return
     bot.reply_to(message, "📭 Активный матч для этого игрока не найден.")
-
-# ================= ТОП И СТАТИСТИКА =================
 
 @bot.message_handler(commands=['top'])
 def show_top(message):
@@ -444,20 +500,6 @@ def show_stats(message):
         bot.reply_to(message, msg + f"\n📌 Матчей сыграно: {sum(p[1]['matches'] for p in players) // 2}\n📌 Забито голов: {sum(p[1]['goals_scored'] for p in players)}")
     except Exception as e: logging.error(e)
 
-# ================= АВТОСБОР ЮЗЕРНЕЙМОВ =================
-
-@bot.message_handler(func=lambda m: True)
-def catch_usernames(message):
-    try:
-        if message.text and message.text.startswith('/'): return
-        found = re.findall(r'@[a-zA-Z0-9_]+', message.text or message.caption or "")
-        if found:
-            thread_id = get_thread_id(message)
-            if thread_id not in posts_data: posts_data[thread_id] = set()
-            for tag in found: posts_data[thread_id].add(tag)
-            save_data()
-    except Exception as e: logging.error(e)
-
 # ================= СЕРВЕР RENDER =================
 
 class DummyHandler(BaseHTTPRequestHandler):
@@ -465,9 +507,21 @@ class DummyHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.end_headers()
         self.wfile.write(b"OK")
+    def log_message(self, format, *args):
+        pass
+
+def run_web_server():
+    port = int(os.environ.get("PORT", 10000))
+    server = HTTPServer(('0.0.0.0', port), DummyHandler)
+    logging.info(f"Веб-сервер запущен на порту {port}")
+    server.serve_forever()
 
 if __name__ == '__main__':
-    threading.Thread(target=lambda: HTTPServer(('0.0.0.0', int(os.environ.get("PORT", 10000))), DummyHandler).serve_forever(), daemon=True).start()
+    threading.Thread(target=run_web_server, daemon=True).start()
+    logging.info("Старт бота (polling)...")
     while True:
-        try: bot.infinity_polling(timeout=20, long_polling_timeout=10)
-        except Exception as e: time.sleep(5)
+        try:
+            bot.infinity_polling(timeout=20, long_polling_timeout=10)
+        except Exception as e:
+            logging.error(f"Сбой polling: {e}. Перезапуск через 5 секунд...")
+            time.sleep(5)
