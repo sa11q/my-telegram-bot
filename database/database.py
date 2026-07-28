@@ -1,60 +1,350 @@
-import json
-import os
-import aiofiles
-import shutil
-from typing import List, Optional
-from database.models import User, Match, Tournament
-from utils.locks import file_lock
+# database/models.py
 
-class BaseRepository:
-    async def get_user(self, user_id: int) -> Optional[User]: pass
-    async def save_user(self, user: User): pass
-    async def get_tournament(self, t_id: str) -> Optional[Tournament]: pass
-    async def save_tournament(self, tournament: Tournament): pass
+from pydantic import BaseModel, Field, ConfigDict
+from typing import Optional, List, Dict
+from enum import Enum
+from datetime import datetime
+import uuid
 
-class JSONRepository(BaseRepository):
-    def __init__(self, file_path: str):
-        self.file_path = file_path
-        self.backup_path = file_path + ".bak"
-        if not os.path.exists(self.file_path):
-            with open(self.file_path, 'w') as f:
-                json.dump({"users": {}, "matches": {}, "tournaments": {}}, f)
 
-    async def _read_db(self) -> dict:
-        async with file_lock:
-            try:
-                async with aiofiles.open(self.file_path, mode='r') as f:
-                    content = await f.read()
-                    return json.loads(content)
-            except (json.JSONDecodeError, FileNotFoundError):
-                if os.path.exists(self.backup_path):
-                    shutil.copy(self.backup_path, self.file_path)
-                    async with aiofiles.open(self.file_path, mode='r') as f:
-                        return json.loads(await f.read())
-                return {"users": {}, "matches": {}, "tournaments": {}}
+# ==========================
+# ENUMS
+# ==========================
 
-    async def _write_db(self, data: dict):
-        async with file_lock:
-            shutil.copy(self.file_path, self.backup_path)
-            async with aiofiles.open(self.file_path, mode='w') as f:
-                await f.write(json.dumps(data, default=str, indent=2))
+class Role(str, Enum):
+    OWNER = "OWNER"
+    ADMIN = "ADMIN"
+    MODERATOR = "MODERATOR"
+    REFEREE = "REFEREE"
+    USER = "USER"
 
-    async def get_user(self, user_id: int) -> Optional[User]:
-        data = await self._read_db()
-        user_data = data["users"].get(str(user_id))
-        return User(**user_data) if user_data else None
 
-    async def save_user(self, user: User):
-        data = await self._read_db()
-        data["users"][str(user.id)] = user.model_dump()
-        await self._write_db(data)
+class TournamentFormat(str, Enum):
+    SINGLE_ELIMINATION = "SINGLE_ELIMINATION"
+    SWISS = "SWISS"
+    LEAGUE = "LEAGUE"
 
-    async def get_tournament(self, t_id: str) -> Optional[Tournament]:
-        data = await self._read_db()
-        t_data = data["tournaments"].get(t_id)
-        return Tournament(**t_data) if t_data else None
 
-    async def save_tournament(self, tournament: Tournament):
-        data = await self._read_db()
-        data["tournaments"][tournament.id] = tournament.model_dump()
-        await self._write_db(data)
+class TournamentStatus(str, Enum):
+    REGISTRATION = "REGISTRATION"
+    ACTIVE = "ACTIVE"
+    FINISHED = "FINISHED"
+    CANCELLED = "CANCELLED"
+
+
+class MatchStatus(str, Enum):
+    PENDING = "PENDING"
+    PLAYING = "PLAYING"
+    WAITING_CONFIRMATION = "WAITING_CONFIRMATION"
+    FINISHED = "FINISHED"
+    DISPUTED = "DISPUTED"
+    CANCELLED = "CANCELLED"
+
+
+class MatchStage(str, Enum):
+    ROUND_OF_128 = "1/128"
+    ROUND_OF_64 = "1/64"
+    ROUND_OF_32 = "1/32"
+    ROUND_OF_16 = "1/8"
+    QUARTER_FINAL = "1/4"
+    SEMI_FINAL = "1/2"
+    FINAL = "FINAL"
+
+
+class DisputeStatus(str, Enum):
+    OPEN = "OPEN"
+    REVIEWING = "REVIEWING"
+    RESOLVED = "RESOLVED"
+    REJECTED = "REJECTED"
+
+
+
+# ==========================
+# USER
+# ==========================
+
+class User(BaseModel):
+    model_config = ConfigDict(use_enum_values=True)
+
+    id: int
+
+    username: Optional[str] = None
+
+    first_name: Optional[str] = None
+
+    role: Role = Role.USER
+
+
+    # Rating system
+    elo: int = 1200
+    peak_elo: int = 1200
+
+
+    # Statistics
+    matches_played: int = 0
+    wins: int = 0
+    losses: int = 0
+    draws: int = 0
+
+
+    # Tournament stats
+    tournaments_played: int = 0
+    tournaments_won: int = 0
+
+
+    # Security
+    is_banned: bool = False
+    ban_reason: Optional[str] = None
+    banned_until: Optional[datetime] = None
+
+
+    created_at: datetime = Field(
+        default_factory=datetime.utcnow
+    )
+
+
+
+# ==========================
+# CHAT ROLES
+# ==========================
+
+class ChatRole(BaseModel):
+
+    chat_id: int
+
+    user_id: int
+
+    role: Role = Role.USER
+
+    created_at: datetime = Field(
+        default_factory=datetime.utcnow
+    )
+
+
+
+# ==========================
+# TOURNAMENT
+# ==========================
+
+class Tournament(BaseModel):
+    model_config = ConfigDict(use_enum_values=True)
+
+
+    id: str = Field(
+        default_factory=lambda: str(uuid.uuid4())
+    )
+
+
+    name: str
+
+
+    creator_id: int
+
+
+    format: TournamentFormat
+
+
+    status: TournamentStatus = (
+        TournamentStatus.REGISTRATION
+    )
+
+
+    max_players: int = 128
+
+
+    participants: List[int] = []
+
+
+    matches: List[str] = []
+
+
+    current_round: int = 0
+
+
+    # Swiss rounds
+    total_rounds: int = 0
+
+
+    # History
+    winner_id: Optional[int] = None
+
+
+    created_at: datetime = Field(
+        default_factory=datetime.utcnow
+    )
+
+
+    finished_at: Optional[datetime] = None
+
+
+
+# ==========================
+# MATCH
+# ==========================
+
+class Match(BaseModel):
+    model_config = ConfigDict(use_enum_values=True)
+
+
+    id: str = Field(
+        default_factory=lambda: str(uuid.uuid4())
+    )
+
+
+    tournament_id: str
+
+
+    player1_id: Optional[int] = None
+
+    player2_id: Optional[int] = None
+
+
+
+    score_player1: Optional[int] = None
+
+    score_player2: Optional[int] = None
+
+
+
+    winner_id: Optional[int] = None
+
+
+
+    stage: MatchStage
+
+
+    status: MatchStatus = (
+        MatchStatus.PENDING
+    )
+
+
+
+    # Confirmation
+    submitted_by: Optional[int] = None
+
+    confirmed_by: List[int] = []
+
+
+
+    # Deadline system
+    deadline: Optional[datetime] = None
+
+
+    reminder_sent: bool = False
+
+
+
+    created_at: datetime = Field(
+        default_factory=datetime.utcnow
+    )
+
+
+
+# ==========================
+# DISPUTE
+# ==========================
+
+class Dispute(BaseModel):
+
+    id: str = Field(
+        default_factory=lambda: str(uuid.uuid4())
+    )
+
+
+    match_id: str
+
+
+    creator_id: int
+
+
+    reason: str
+
+
+    evidence: Optional[str] = None
+
+
+    status: DisputeStatus = (
+        DisputeStatus.OPEN
+    )
+
+
+    resolved_by: Optional[int] = None
+
+
+    resolution: Optional[str] = None
+
+
+
+    created_at: datetime = Field(
+        default_factory=datetime.utcnow
+    )
+
+
+
+# ==========================
+# TOURNAMENT HISTORY
+# ==========================
+
+class TournamentHistory(BaseModel):
+
+    id: str = Field(
+        default_factory=lambda: str(uuid.uuid4())
+    )
+
+
+    tournament_id: str
+
+
+    winner_id: int
+
+
+    participants_count: int
+
+
+    format: TournamentFormat
+
+
+    created_at: datetime = Field(
+        default_factory=datetime.utcnow
+    )
+
+
+
+# ==========================
+# GLOBAL SETTINGS
+# ==========================
+
+class BotSettings(BaseModel):
+
+    maintenance_mode: bool = False
+
+
+    default_elo: int = 1200
+
+
+    allow_registration: bool = True
+
+
+    language: str = "ru"
+
+
+
+# ==========================
+# DATABASE ROOT STRUCTURE
+# ==========================
+
+class DatabaseSchema(BaseModel):
+
+    users: Dict[str, User] = {}
+
+    tournaments: Dict[str, Tournament] = {}
+
+    matches: Dict[str, Match] = {}
+
+    disputes: Dict[str, Dispute] = {}
+
+    chat_roles: Dict[str, ChatRole] = {}
+
+    history: Dict[str, TournamentHistory] = {}
+
+    settings: BotSettings = BotSettings()
