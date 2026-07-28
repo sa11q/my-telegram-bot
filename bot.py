@@ -7,7 +7,6 @@ from aiogram import Bot, Dispatcher
 from aiogram.fsm.storage.memory import MemoryStorage
 
 # Импорты из наших будущих модулей
-from config import BOT_TOKEN, ADMIN_IDS
 from database import init_db, close_db
 from players import players_router
 from admin import admin_router
@@ -17,10 +16,19 @@ from scheduler import start_scheduler, stop_scheduler
 from middlewares.i18n import I18nMiddleware
 
 # ==========================================
+# ОСНОВНЫЕ НАСТРОЙКИ
+# ==========================================
+# Твой рабочий токен
+BOT_TOKEN = "8876079721:AAHWW6G5nTcbk06C_sN5P-OzqkWpqlx5PBI"
+
+# Впиши сюда свой ID (можно узнать через @userinfobot)
+ADMIN_IDS = [123456789] 
+
+# ==========================================
 # НАСТРОЙКА ЛОГИРОВАНИЯ
 # ==========================================
 def setup_logging():
-    """Создает папку логов и настраивает ротацию файлов (максимум 5 файлов по 5 МБ)"""
+    """Создает папку логов и настраивает ротацию файлов"""
     if not os.path.exists("logs"):
         os.makedirs("logs")
         
@@ -34,7 +42,7 @@ def setup_logging():
                 backupCount=5, 
                 encoding="utf-8"
             ),
-            logging.StreamHandler() # Вывод логов в консоль
+            logging.StreamHandler()
         ]
     )
 
@@ -53,15 +61,15 @@ async def on_startup(bot: Bot):
     
     logger.info("Бот успешно запущен!")
     
-    # Уведомление админов о запуске (опционально)
+    # Уведомление админов о запуске
     for admin_id in ADMIN_IDS:
         try:
-            await bot.send_message(admin_id, "✅ Система турниров успешно запущена и готова к работе!")
+            await bot.send_message(admin_id, "✅ Система турниров успешно запущена!")
         except Exception as e:
             logger.warning(f"Не удалось отправить уведомление админу {admin_id}: {e}")
 
 async def on_shutdown(bot: Bot):
-    """Выполняется перед выключением бота (graceful shutdown)"""
+    """Выполняется перед выключением бота"""
     logger.info("Остановка планировщика дедлайнов...")
     await stop_scheduler()
     
@@ -76,18 +84,13 @@ async def on_shutdown(bot: Bot):
 async def main():
     setup_logging()
     
-    # Инициализация бота и диспетчера
-    # parse_mode="HTML" позволяет использовать <b>, <i> и <code> в текстах
     bot = Bot(token=BOT_TOKEN, parse_mode="HTML")
-    
-    # MemoryStorage используется для хранения состояний (FSM) в оперативной памяти
     dp = Dispatcher(storage=MemoryStorage())
     
     # РЕГИСТРАЦИЯ ПЕРЕВОДЧИКА (i18n)
-    # Важно: регистрируем ДО подключения роутеров, чтобы перехватывать все сообщения
     dp.update.middleware(I18nMiddleware())
     
-    # Регистрация роутеров (разделение команд админа и игроков)
+    # Регистрация роутеров 
     dp.include_router(admin_router)
     dp.include_router(players_router)
     
@@ -95,8 +98,6 @@ async def main():
     dp.startup.register(on_startup)
     dp.shutdown.register(on_shutdown)
     
-    # Сбрасываем накопившиеся апдейты, чтобы бот не обрабатывал 
-    # старые сообщения после перезапуска/обновления
     await bot.delete_webhook(drop_pending_updates=True)
     
     logger.info("Запуск polling...")
