@@ -6,6 +6,7 @@ import json
 import random
 import math
 import time
+import tempfile
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 # 1. Логирование
@@ -39,7 +40,8 @@ def load_data():
                         "registration_open": True,
                         "history": [],
                         "champion": None,
-                        "stage": 1
+                        "stage": 1,
+                        "recent_results": []
                     }
                 else:
                     for tid, tdata in raw_tournaments.items():
@@ -49,14 +51,14 @@ def load_data():
                             "registration_open": tdata.get("registration_open", True),
                             "history": tdata.get("history", []),
                             "champion": tdata.get("champion", None),
-                            "stage": tdata.get("stage", 1)
+                            "stage": tdata.get("stage", 1),
+                            "recent_results": tdata.get("recent_results", [])
                         }
 
                 return {
                     "tournaments": tournaments,
                     "stats": data.get("stats", {"players": {}, "teams": {}}),
-                    "champions": data.get("champions", []),
-                    "recent_results": data.get("recent_results", [])
+                    "champions": data.get("champions", [])
                 }
         except Exception as e:
             logging.error(f"Ошибка загрузки базы: {e}")
@@ -68,12 +70,12 @@ def load_data():
                 "registration_open": True,
                 "history": [],
                 "champion": None,
-                "stage": 1
+                "stage": 1,
+                "recent_results": []
             }
         },
         "stats": {"players": {}, "teams": {}},
-        "champions": [],
-        "recent_results": []
+        "champions": []
     }
 
 def save_data():
@@ -81,13 +83,16 @@ def save_data():
         export_data = {
             "tournaments": db["tournaments"],
             "stats": db["stats"],
-            "champions": db["champions"],
-            "recent_results": db["recent_results"]
+            "champions": db["champions"]
         }
-        with open(DB_FILE, "w", encoding="utf-8") as f:
-            json.dump(export_data, f, ensure_ascii=False, indent=2)
+        # Атомарное сохранение через временный файл для защиты от повреждений
+        dir_name = os.path.dirname(DB_FILE)
+        with tempfile.NamedTemporaryFile('w', dir=dir_name, delete=False, encoding="utf-8") as tf:
+            json.dump(export_data, tf, ensure_ascii=False, indent=2)
+            temp_name = tf.name
+        os.replace(temp_name, DB_FILE)
     except Exception as e:
-        logging.error(f"Ошибка сохранения: {e}")
+        logging.error(f"Ошибка атомарного сохранения: {e}")
 
 db = load_data()
 tournaments = db["tournaments"]
@@ -98,25 +103,40 @@ def is_admin(message):
         return message.from_user.username.lower() in ADMINS
     return False
 
-def get_thread_id(message):
+def get_tournament_id(message):
+    # Каждый пост регистрации или чат/тренд определяет уникальный турнир
     if message.reply_to_message:
         return str(message.reply_to_message.message_id)
     if message.message_thread_id:
         return str(message.message_thread_id)
     return str(message.chat.id)
 
-def get_tournament(message):
-    tid = get_thread_id(message)
-    if tid not in tournaments:
-        tournaments[tid] = {
+def get_tournament_by_id(tid):
+    tid_str = str(tid)
+    if tid_str not in tournaments:
+        tournaments[tid_str] = {
             "posts": {},
             "active_tour": {"teams": [], "matches": []},
             "registration_open": True,
             "history": [],
             "champion": None,
-            "stage": 1
+            "stage": 1,
+            "recent_results": []
         }
-    return tournaments[tid]
+    return tournaments[tid_str]
+
+def get_tournament(message):
+    return get_tournament_by_id(get_tournament_id(message))
+
+def find_match_by_msg_id(msg_id):
+    for tid, tour in tournaments.items():
+        for m in tour["active_tour"].get("matches", []):
+            if m.get("msg_id") == msg_id:
+                return tour, m, tid
+        for m in tour.get("history", []):
+            if m.get("msg_id") == msg_id:
+                return tour, m, tid
+    return None, None, None
 
 def calculate_elo(rating1, rating2, score1, score2):
     k = 32
@@ -139,47 +159,9 @@ def init_player(username):
             "current_loss_streak": 0, "max_loss_streak": 0,
             "biggest_win": 0, "biggest_loss": 0,
             "last_opponent": None, "last_match_date": None,
-            "tournaments_played": 0, "championships": 0,
+            "championships": 0,
             "match_history": []
         }
-
-def rollback_match_stats(m):
-    p1, p2 = m["p1"], m["p2"]
-    s1, s2 = m["s1"], m["s2"]
-    name1, name2 = p1.replace('@', ''), p2.replace('@', '')
-    
-    init_player(p1)
-    init_player(p2)
-    
-    # Откат голов
-    tour_stats["players"][name1]["goals_scored"] -= s1
-    tour_stats["players"][name1]["goals_conceded"] -= s2
-    tour_stats["players"][name1]["matches"] -= 1
-    
-    tour_stats["players"][name2]["goals_scored"] -= s2
-    tour_stats["players"][name2]["goals_conceded"] -= s1
-    tour_stats["players"][name2]["matches"] -= 1
-    
-    # Откат побед/поражений/ничьих
-    p1_stat = tour_stats["players"][name1]
-    p2_stat = tour_stats["players"][name2]
-    
-    if s1 > s2:
-        p1_stat["wins"] -= 1
-        p2_stat["losses"] -= 1
-    elif s1 < s2:
-        p1_stat["losses"] -= 1
-        p2_stat["wins"] -= 1
-    else:
-        p1_stat["draws"] -= 1
-        p2_stat["draws"] -= 1
-        
-    # Удаляем из истории матчей игроков
-    if m in p1_stat["match_history"]: p1_stat["match_history"].remove(m)
-    if m in p2_stat["match_history"]: p2_stat["match_history"].remove(m)
-    
-    # Полный пересчет Elo и серий путем сканирования всей истории матчей (надежно)
-    recalculate_all_stats()
 
 def recalculate_all_stats():
     for p in tour_stats["players"]:
@@ -198,7 +180,7 @@ def recalculate_all_stats():
         tour_stats["players"][p]["biggest_loss"] = 0
         tour_stats["players"][p]["match_history"] = []
 
-    # Собираем все сыгранные матчи из истории всех турниров
+    # Собираем все сыгранные матчи из истории и активных сеток всех турниров
     all_played = []
     for tid, t in tournaments.items():
         for hist in t.get("history", []):
@@ -266,8 +248,8 @@ def recalculate_all_stats():
         
         p1_s["last_opponent"] = p2
         p2_s["last_opponent"] = p1
-        p1_s["match_history"].append(m)
-        p2_s["match_history"].append(m)
+        p1_s["match_history"].append(dict(m))
+        p2_s["match_history"].append(dict(m))
 
 def process_match_result(tour, p1, p2, s1, s2, sender_username=None, message_id=None):
     active_tour = tour["active_tour"]
@@ -292,13 +274,15 @@ def process_match_result(tour, p1, p2, s1, s2, sender_username=None, message_id=
             
             recalculate_all_stats()
             
-            # Добавляем в последние результаты
+            # Добавляем в последние результаты конкретного турнира и общие
             res_item = {
                 "p1": m["p1"], "p2": m["p2"], "s1": s1, "s2": s2, "sender": sender_username
             }
-            db["recent_results"].insert(0, res_item)
-            if len(db["recent_results"]) > 20:
-                db["recent_results"].pop()
+            if "recent_results" not in tour:
+                tour["recent_results"] = []
+            tour["recent_results"].insert(0, res_item)
+            if len(tour["recent_results"]) > 20:
+                tour["recent_results"].pop()
                 
             save_data()
             return True, m
@@ -308,19 +292,25 @@ def process_match_result(tour, p1, p2, s1, s2, sender_username=None, message_id=
 
 @bot.message_handler(commands=['open'])
 def open_registration(message):
-    if not is_admin(message): return
-    tour = get_tournament(message)
-    tour["registration_open"] = True
-    save_data()
-    bot.reply_to(message, "✅ Регистрация на турнир открыта!")
+    try:
+        if not is_admin(message): return
+        tour = get_tournament(message)
+        tour["registration_open"] = True
+        save_data()
+        bot.reply_to(message, "✅ Регистрация на турнир открыта!")
+    except Exception as e:
+        logging.error(f"Open reg error: {e}")
 
 @bot.message_handler(commands=['close'])
 def close_registration(message):
-    if not is_admin(message): return
-    tour = get_tournament(message)
-    tour["registration_open"] = False
-    save_data()
-    bot.reply_to(message, "❌ Регистрация на турнир закрыта!")
+    try:
+        if not is_admin(message): return
+        tour = get_tournament(message)
+        tour["registration_open"] = False
+        save_data()
+        bot.reply_to(message, "❌ Регистрация на турнир закрыта!")
+    except Exception as e:
+        logging.error(f"Close reg error: {e}")
 
 @bot.message_handler(commands=['join'])
 def player_join_tournament(message):
@@ -332,44 +322,54 @@ def player_join_tournament(message):
             bot.reply_to(message, "⚠️ У вас не установлен username в Telegram. Пожалуйста, установите его в настройках профиля, чтобы зарегистрироваться.")
             return
 
-        tour = get_tournament(message)
+        # 1. /join работает только ответом на пост регистрации.
+        if not message.reply_to_message or not message.reply_to_message.text:
+            bot.reply_to(message, "⚠️ Команда `/join` должна быть ответом на пост регистрации.")
+            return
+
+        target_text = message.reply_to_message.text.lower()
+        # Пост регистрации обязан содержать ключевые слова
+        if not any(kw in target_text for kw in ["registration", "регистрация", "рег"]):
+            bot.reply_to(message, "⚠️ Это сообщение не является постом регистрации (нет слов registration / регистрация / рег).")
+            return
+
+        # Определяем турнир именно по ID поста регистрации, чтобы обеспечить независимость
+        reg_post_id = str(message.reply_to_message.message_id)
+        tour = get_tournament_by_id(reg_post_id)
+
         if not tour.get("registration_open", True):
             bot.reply_to(message, "❌ Регистрация на этот турнир закрыта.")
             return
 
-        # Проверка ключевых слов в посте, на который отвечают или в тексте сообщения
-        target_text = ""
-        if message.reply_to_message and message.reply_to_message.text:
-            target_text = message.reply_to_message.text.lower()
-        if message.text:
-            target_text += " " + message.text.lower()
-            
-        if not ("registration" in target_text or "регистрация" in target_text):
-            bot.reply_to(message, "⚠️ Зарегистрироваться можно только под постом, содержащим слова 'registration' или 'регистрация'.")
-            return
-
         username = f"@{message.from_user.username}"
-        thread_id = get_thread_id(message)
 
-        if thread_id not in tour["posts"]:
-            tour["posts"][thread_id] = []
+        # Проверка: игрок не может попасть сразу в несколько регистраций одного турнира / дублироваться
+        for tid, t in tournaments.items():
+            for post_id, plist in t.get("posts", {}).items():
+                if username in plist:
+                    # Если уже зарегистрирован в текущем турнире
+                    if tid == reg_post_id:
+                        bot.reply_to(message, f"ℹ️ Вы уже зарегистрированы в этом турнире!\n\n👥 Участников: {len(plist)}")
+                        return
+                    else:
+                        bot.reply_to(message, "❌ Вы уже зарегистрированы в другом активном турнире.")
+                        return
 
-        if username in tour["posts"][thread_id]:
-            bot.reply_to(message, f"ℹ️ Вы уже зарегистрированы под этим постом!\n\n👥 Сейчас зарегистрировано: {len(tour['posts'][thread_id])} игроков.")
-            return
+        if reg_post_id not in tour["posts"]:
+            tour["posts"][reg_post_id] = []
 
-        tour["posts"][thread_id].append(username)
+        tour["posts"][reg_post_id].append(username)
         save_data()
 
-        total = len(tour["posts"][thread_id])
-        bot.reply_to(message, f"✅ @{message.from_user.username} зарегистрирован.\n\n👥 Сейчас зарегистрировано: {total} игроков.")
+        total = len(tour["posts"][reg_post_id])
+        bot.reply_to(message, f"✅ @{message.from_user.username} успешно зарегистрирован!\n\n👥 Всего участников: {total}")
     except Exception as e:
         logging.error(f"Join error: {e}")
         bot.reply_to(message, "❌ Произошла ошибка при регистрации.")
 
 @bot.message_handler(commands=['collect'])
 def admin_collect_players(message):
-    bot.reply_to(message, "⚠️ Команда больше не используется. Для регистрации игроки должны написать `/join` под постом турнира.")
+    bot.reply_to(message, "⚠️ Команда больше не используется. Для регистрации игроки должны ответить `/join` на пост турнира.")
 
 @bot.message_handler(commands=['add'])
 def admin_add_player(message):
@@ -383,7 +383,7 @@ def admin_add_player(message):
         if not username.startswith('@'): username = '@' + username
 
         tour = get_tournament(message)
-        thread_id = get_thread_id(message)
+        thread_id = get_tournament_id(message)
         if thread_id not in tour["posts"]: tour["posts"][thread_id] = []
 
         if username in tour["posts"][thread_id]:
@@ -407,7 +407,7 @@ def admin_remove_player(message):
         if not username.startswith('@'): username = '@' + username
 
         tour = get_tournament(message)
-        thread_id = get_thread_id(message)
+        thread_id = get_tournament_id(message)
         if thread_id in tour["posts"] and username in tour["posts"][thread_id]:
             tour["posts"][thread_id].remove(username)
             save_data()
@@ -423,7 +423,7 @@ def admin_remove_player(message):
 def show_collected_list(message):
     try:
         tour = get_tournament(message)
-        thread_id = get_thread_id(message)
+        thread_id = get_tournament_id(message)
         participants = list(tour["posts"].get(thread_id, []))
         
         if not participants:
@@ -446,7 +446,7 @@ def send_welcome(message):
             message, 
             "✅ Бот запущен (Tournament System)\n\n"
             "👤 ИГРОКАМ:\n"
-            "• `/join` — зарегистрироваться на турнир\n"
+            "• `/join` (ответом на пост) — регистрация\n"
             "• `/profile [@user]` — турнирный паспорт\n"
             "• `/vs` — найти текущего соперника\n"
             "• `/bracket` — турнирная сетка\n"
@@ -457,7 +457,7 @@ def send_welcome(message):
             "• Напиши счет матча (например: `3:2`), чтобы бот засчитал его!\n\n"
             "👑 АДМИНАМ:\n"
             "• `/open` / `/close` — управление регистрацией\n"
-            "• `/draw [режим]` — жеребьевка (solo/duo/trio/4v4)\n"
+            "• `/draw [режим] [лимит]` — жеребьевка (solo/duo/trio/4v4)\n"
             "• `/results [текст]` — прописать счета\n"
             "• `/next` — следующий этап\n"
             "• `/tp @username` — тех. поражение\n"
@@ -472,7 +472,7 @@ def make_draw(message):
         if not is_admin(message): return
         
         tour = get_tournament(message)
-        thread_id = get_thread_id(message)
+        thread_id = get_tournament_id(message)
         collected = list(tour["posts"].get(thread_id, []))
         if not collected:
             bot.reply_to(message, "📭 Список участников пуст. Сначала игроки должны зарегистрироваться через /join.")
@@ -501,6 +501,7 @@ def make_draw(message):
 
         playoff_teams_count = 2 ** int(math.log2(total_teams))
         active_players = collected[:playoff_teams_count * team_size]
+        reserve_players = collected[playoff_teams_count * team_size:]
 
         teams, team_names = [], []
         if mode == "solo":
@@ -540,6 +541,9 @@ def make_draw(message):
                 if mode == "solo": msg += f"⚔️ {t1_members[j]} vs {t2_members[j]}\n"
                 else: msg += f"• {t1_members[j]} vs {t2_members[j]}\n"
             if mode != "solo": msg += "\n"
+
+        if reserve_players:
+            msg += f"📌 Запасные игроки: {', '.join(reserve_players)}\n"
 
         save_data()
         bot.reply_to(message, msg)
@@ -608,8 +612,11 @@ def next_stage(message):
                 advancing_teams.append(winner)
                 bot.send_message(message.chat.id, f"⚖️ Ничья {t1} - {t2}. Проходит: {winner}")
 
-        # Архивируем текущие матчи в историю турнира
-        tour["history"].extend(tour["active_tour"]["matches"])
+        # Архивируем текущие матчи в историю турнира (независимые копии)
+        for m in tour["active_tour"]["matches"]:
+            if m not in tour["history"]:
+                tour["history"].append(dict(m))
+
         tour["active_tour"]["teams"] = advancing_teams
         tour["active_tour"]["matches"] = []
         tour["stage"] += 1
@@ -618,7 +625,7 @@ def next_stage(message):
             champion = advancing_teams[0] if advancing_teams else "Не определен"
             tour["champion"] = champion
             
-            # Начисляем достижение чемпиону
+            # Начисляем достижение чемпиону и открываем регистрацию снова
             if not champion.startswith("Команда"):
                 init_player(champion)
                 tour_stats["players"][champion.replace('@', '')]["championships"] += 1
@@ -628,13 +635,14 @@ def next_stage(message):
                     tour_stats["players"][member.replace('@', '')]["championships"] += 1
                     
             db["champions"].append({
-                "tournament": get_thread_id(message),
+                "tournament": get_tournament_id(message),
                 "champion": champion,
                 "date": time.strftime("%Y-%m-%d %H:%M")
             })
             
+            tour["registration_open"] = True # Открываем регистрацию после завершения турнира
             save_data()
-            bot.reply_to(message, f"🎉 ТУРНИР ЗАВЕРШЕН! Чемпион: {champion}")
+            bot.reply_to(message, f"🎉 ТУРНИР ЗАВЕРШЕН! Чемпион: {champion}\n\nРегистрация на следующий турнир автоматически открыта!")
             return
 
         msg = f"🏆 СЛЕДУЮЩИЙ ЭТАП ПЛЕЙ-ОФФ (Этап {tour['stage']})\n\n"
@@ -734,8 +742,7 @@ def auto_score(message):
     except Exception as e:
         logging.error(e)
 
-# Callback handlers for Inline buttons
-# Хранение состояния ожидания ввода нового счета от админа: {admin_chat_id: match_obj}
+# Хранение состояния ожидания ввода нового счета от админа в оперативной памяти (только временный ввод)
 admin_edit_sessions = {}
 
 @bot.callback_query_handler(func=lambda call: True)
@@ -748,22 +755,10 @@ def callback_inline(call):
             bot.answer_callback_query(call.id, "⛔️ Только для администраторов!", show_alert=True)
             return
 
-        tour = get_tournament(call.message)
-        target_match = None
-        for m in tour["active_tour"]["matches"]:
-            if m.get("msg_id") == call.message.message_id:
-                target_match = m
-                break
-        
-        if not target_match:
-            # Ищем в истории, если не нашли в активных
-            for m in tour["history"]:
-                if m.get("msg_id") == call.message.message_id:
-                    target_match = m
-                    break
+        tour, target_match, tid = find_match_by_msg_id(call.message.message_id)
 
         if not target_match:
-            bot.answer_callback_query(call.id, "❌ Матч не найден в базе.", show_alert=True)
+            bot.answer_callback_query(call.id, "❌ Матч не найден в базе данных.", show_alert=True)
             return
 
         data = call.data
@@ -771,51 +766,56 @@ def callback_inline(call):
             if not target_match["done"]:
                 bot.answer_callback_query(call.id, "ℹ️ Матч уже не сыгран.")
                 return
-            rollback_match_stats(target_match)
             target_match["done"] = False
             target_match["s1"] = None
             target_match["s2"] = None
+            recalculate_all_stats()
             save_data()
-            bot.edit_message_text(
-                f"❌ Результат отменен администратором @{call.from_user.username}.\nМатч снова доступен для отправки счета.",
-                call.message.chat.id,
-                call.message.message_id
-            )
+            try:
+                bot.edit_message_text(
+                    f"❌ Результат отменен администратором @{call.from_user.username}.\nМатч снова доступен для отправки счета.",
+                    call.message.chat.id,
+                    call.message.message_id
+                )
+            except Exception:
+                pass
             bot.answer_callback_query(call.id, "✅ Результат отменен.")
 
         elif data == "match_tp1":
-            if target_match["done"]:
-                rollback_match_stats(target_match)
             target_match["s1"], target_match["s2"], target_match["done"] = 6, 0, True
             target_match["msg_id"] = call.message.message_id
             recalculate_all_stats()
             save_data()
-            bot.edit_message_text(
-                f"✅ Результат зарегистрирован (ТП)\n\n"
-                f"{target_match['p1']} 6:0 {target_match['p2']}\n\n"
-                f"👤 ТП назначен администратором @{call.from_user.username}",
-                call.message.chat.id,
-                call.message.message_id,
-                reply_markup=get_match_inline_keyboard()
-            )
+            try:
+                bot.edit_message_text(
+                    f"✅ Результат зарегистрирован (ТП)\n\n"
+                    f"{target_match['p1']} 6:0 {target_match['p2']}\n\n"
+                    f"👤 ТП назначен администратором @{call.from_user.username}",
+                    call.message.chat.id,
+                    call.message.message_id,
+                    reply_markup=get_match_inline_keyboard()
+                )
+            except Exception:
+                pass
             check_stage_completion(call.message, tour)
             bot.answer_callback_query(call.id, "✅ ТП первому игроку записано.")
 
         elif data == "match_tp2":
-            if target_match["done"]:
-                rollback_match_stats(target_match)
             target_match["s1"], target_match["s2"], target_match["done"] = 0, 6, True
             target_match["msg_id"] = call.message.message_id
             recalculate_all_stats()
             save_data()
-            bot.edit_message_text(
-                f"✅ Результат зарегистрирован (ТП)\n\n"
-                f"{target_match['p1']} 0:6 {target_match['p2']}\n\n"
-                f"👤 ТП назначен администратором @{call.from_user.username}",
-                call.message.chat.id,
-                call.message.message_id,
-                reply_markup=get_match_inline_keyboard()
-            )
+            try:
+                bot.edit_message_text(
+                    f"✅ Результат зарегистрирован (ТП)\n\n"
+                    f"{target_match['p1']} 0:6 {target_match['p2']}\n\n"
+                    f"👤 ТП назначен администратором @{call.from_user.username}",
+                    call.message.chat.id,
+                    call.message.message_id,
+                    reply_markup=get_match_inline_keyboard()
+                )
+            except Exception:
+                pass
             check_stage_completion(call.message, tour)
             bot.answer_callback_query(call.id, "✅ ТП второму игроку записано.")
 
@@ -838,9 +838,6 @@ def admin_edit_score_handler(message):
         score_match = re.search(r'\b(\d+)\s*:\s*(\d+)\b', message.text)
         if not score_match: return
         sc1, sc2 = int(score_match.group(1)), int(score_match.group(2))
-
-        if target_match["done"]:
-            rollback_match_stats(target_match)
 
         target_match["s1"], target_match["s2"], target_match["done"] = sc1, sc2, True
         recalculate_all_stats()
@@ -919,7 +916,7 @@ def show_history(message):
             return bot.reply_to(message, f"📭 У игрока @{clean_name} нет истории матчей.")
 
         msg = f"📜 История матчей @{clean_name}:\n\n"
-        for m in history[-10:]: # Последние 10 матчей
+        for m in history[-10:]:
             msg += f"• {m['p1']} {m['s1']}:{m['s2']} {m['p2']}\n"
         bot.reply_to(message, msg)
     except Exception as e:
@@ -928,9 +925,10 @@ def show_history(message):
 @bot.message_handler(commands=['recent'])
 def show_recent(message):
     try:
-        recent = db.get("recent_results", [])
+        tour = get_tournament(message)
+        recent = tour.get("recent_results", [])
         if not recent:
-            return bot.reply_to(message, "📭 Последние результаты отсутствуют.")
+            return bot.reply_to(message, "📭 Последние результаты отсутствуют в этом турнире.")
 
         msg = "⏱ Последние результаты:\n\n"
         for r in recent[:10]:
@@ -959,7 +957,7 @@ def show_active_tournaments(message):
     try:
         active_list = []
         for tid, t in tournaments.items():
-            if not t.get("champion"):
+            if not t.get("champion") and t.get("active_tour", {}).get("matches"):
                 active_list.append(tid)
 
         if not active_list:
@@ -967,51 +965,58 @@ def show_active_tournaments(message):
 
         msg = f"🟢 Активные турниры ({len(active_list)}):\n\n"
         for tid in active_list:
-            msg += f"• ID чата/ветки: {tid}\n"
+            msg += f"• ID турнира/поста: {tid}\n"
         bot.reply_to(message, msg)
     except Exception as e:
         logging.error(e)
 
 @bot.message_handler(commands=['profile', 'профиль'])
 def show_profile(message):
-    args = message.text.split()
-    target = args[1] if len(args) > 1 else message.from_user.username
-    if not target: return
-    clean_name = target.replace('@', '').lower()
+    try:
+        args = message.text.split()
+        target = args[1] if len(args) > 1 else message.from_user.username
+        if not target: return
+        clean_name = target.replace('@', '').lower()
 
-    actual_name = None
-    for name in tour_stats["players"]:
-        if name.lower() == clean_name:
-            actual_name = name
-            break
+        actual_name = None
+        for name in tour_stats["players"]:
+            if name.lower() == clean_name:
+                actual_name = name
+                break
 
-    if not actual_name:
-        bot.reply_to(message, "📭 Турнирный профиль не найден. Нужно сыграть хотя бы 1 матч.")
-        return
+        if not actual_name:
+            bot.reply_to(message, "📭 Турнирный профиль не найден. Нужно сыграть хотя бы 1 матч.")
+            return
 
-    data = tour_stats["players"][actual_name]
-    diff = data['goals_scored'] - data['goals_conceded']
-    diff_str = f"+{diff}" if diff > 0 else str(diff)
-    
-    matches = data['matches']
-    wins = data['wins']
-    losses = data['losses']
-    draws = data['draws']
-    winrate = round((wins / matches * 100), 1) if matches > 0 else 0.0
+        data = tour_stats["players"][actual_name]
+        diff = data['goals_scored'] - data['goals_conceded']
+        diff_str = f"+{diff}" if diff > 0 else str(diff)
+        
+        matches = data['matches']
+        wins = data['wins']
+        losses = data['losses']
+        draws = data['draws']
+        winrate = round((wins / matches * 100), 1) if matches > 0 else 0.0
 
-    text = (f"🎟 ТУРНИРНЫЙ ПАСПОРТ\n\n"
-            f"👤 Игрок: @{actual_name}\n"
-            f"🏆 Рейтинг Эло: {data['elo']}\n"
-            f"📊 Матчей: {matches} (П: {wins} | Н: {draws} | Пр: {losses})\n"
-            f"📈 WinRate: {winrate}%\n"
-            f"🔥 Серия побед: текущая {data['current_win_streak']} (макс. {data['max_win_streak']})\n"
-            f"❄️ Серия поражений: текущая {data['current_loss_streak']} (макс. {data['max_loss_streak']})\n"
-            f"⚽️ Забито: {data['goals_scored']} | 🧤 Пропущено: {data['goals_conceded']} (Разница: {diff_str})\n"
-            f"💥 Самая крупная победа: +{data['biggest_win']}\n"
-            f"💀 Самое крупное поражение: -{data['biggest_loss']}\n"
-            f"👥 Последний соперник: {data['last_opponent'] or 'Нет'}\n"
-            f"🥇 Чемпионств: {data['championships']}")
-    bot.reply_to(message, text)
+        # Подсчет общего количества завершенных турниров и чемпионств
+        total_tournaments_count = len(tournaments)
+
+        text = (f"🎟 ТУРНИРНЫЙ ПАСПОРТ\n\n"
+                f"👤 Игрок: @{actual_name}\n"
+                f"🏆 Рейтинг Эло: {data['elo']}\n"
+                f"📊 Матчей: {matches} (П: {wins} | Н: {draws} | Пр: {losses})\n"
+                f"📈 WinRate: {winrate}%\n"
+                f"🔥 Серия побед: текущая {data['current_win_streak']} (макс. {data['max_win_streak']})\n"
+                f"❄️ Серия поражений: текущая {data['current_loss_streak']} (макс. {data['max_loss_streak']})\n"
+                f"⚽️ Забито: {data['goals_scored']} | 🧤 Пропущено: {data['goals_conceded']} (Разница: {diff_str})\n"
+                f"💥 Самая крупная победа: +{data['biggest_win']}\n"
+                f"💀 Самое крупное поражение: -{data['biggest_loss']}\n"
+                f"👥 Последний соперник: {data['last_opponent'] or 'Нет'}\n"
+                f"📌 Всего турниров: {total_tournaments_count}\n"
+                f"🥇 Чемпионств: {data['championships']}")
+        bot.reply_to(message, text)
+    except Exception as e:
+        logging.error(e)
 
 @bot.message_handler(commands=['tp'])
 def tech_defeat(message):
@@ -1044,7 +1049,7 @@ def show_top(message):
         if not players: return bot.reply_to(message, "📊 База пуста.")
         limit = int(message.text.split()[1]) if len(message.text.split()) > 1 and message.text.split()[1].isdigit() else 70
         sorted_players = sorted(players.items(), key=lambda x: x[1]["elo"], reverse=True)[:limit]
-        bot.reply_to(message, "\n".join(["🏆 Mini Cup Elo Top"] + [f"{i}. {n} ({d['elo']} Elo)" for i, (n, d) in enumerate(sorted_players, 1)]))
+        bot.reply_to(message, "\n".join(["🏆 Mini Cup Elo Top"] + [f"{i}. @{n} ({d['elo']} Elo)" for i, (n, d) in enumerate(sorted_players, 1)]))
     except Exception as e: logging.error(e)
 
 @bot.message_handler(commands=['stats'])
@@ -1053,27 +1058,18 @@ def show_stats(message):
         players = list(tour_stats.get("players", {}).items())
         if not players: return bot.reply_to(message, "📊 Статистика пуста.")
         
-        # Лучший Elo
         best_elo = max(players, key=lambda x: x[1]["elo"]) if players else ("Нет", {"elo": 0})
         
-        # Лучший винрейт (минимум 2 матча)
         qualified_wr = [(n, d, (d["wins"]/d["matches"]*100) if d["matches"]>0 else 0) for n, d in players if d["matches"] >= 2]
         best_wr = max(qualified_wr, key=lambda x: x[2]) if qualified_wr else ("Нет", None, 0)
         
-        # Лучший бомбардир
         best_scorer = max(players, key=lambda x: x[1]["goals_scored"]) if players else ("Нет", {"goals_scored": 0})
         
-        # Лучшая защита (меньше пропущенных при матчах > 0)
         qualified_def = [(n, d) for n, d in players if d["matches"] > 0]
         best_def = min(qualified_def, key=lambda x: x[1]["goals_conceded"]) if qualified_def else ("Нет", {"goals_conceded": 0})
         
-        # Длинная победная серия
         best_streak = max(players, key=lambda x: x[1]["max_win_streak"]) if players else ("Нет", {"max_win_streak": 0})
         
-        # Серия без поражений (макс победная + ничьи / просто макс вин стрик в текущей реализации)
-        best_unbeaten = max(players, key=lambda x: x[1]["max_win_streak"]) if players else ("Нет", {"max_win_streak": 0})
-        
-        # Самый активный игрок (по матчам)
         most_active = max(players, key=lambda x: x[1]["matches"]) if players else ("Нет", {"matches": 0})
         
         total_tournaments = len(tournaments)
