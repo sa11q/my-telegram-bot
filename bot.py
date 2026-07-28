@@ -8,6 +8,7 @@ import math
 import time
 import tempfile
 import threading
+import shutil
 from datetime import datetime, timedelta
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 
@@ -28,6 +29,7 @@ db_lock = threading.Lock()
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_FILE = os.path.join(BASE_DIR, "database.json")
+DB_BACKUP_FILE = os.path.join(BASE_DIR, "database_backup.json")
 
 # =====================================================================
 #  БАЗА ДАННЫХ И МИГРАЦИЯ
@@ -35,6 +37,7 @@ DB_FILE = os.path.join(BASE_DIR, "database.json")
 
 def get_default_db():
     return {
+        "database_version": 1,
         "active_tournament": {
             "title": "Mini Cup",
             "mode": "solo",  # solo, duo, trio, 4v4
@@ -64,36 +67,60 @@ def get_default_db():
 
 def load_data():
     with db_lock:
+        data = None
         if os.path.exists(DB_FILE):
             try:
                 with open(DB_FILE, "r", encoding="utf-8") as f:
                     data = json.load(f)
-                    default_db = get_default_db()
-                    
-                    # Структурная валидация ключей
-                    if "active_tournament" not in data:
-                        data["active_tournament"] = default_db["active_tournament"]
-                    else:
-                        for k, v in default_db["active_tournament"].items():
-                            if k not in data["active_tournament"]:
-                                data["active_tournament"][k] = v
-
-                    if "stats" not in data or "players" not in data["stats"]:
-                        data["stats"] = {"players": {}}
-                    if "champions" not in data:
-                        data["champions"] = []
-                    if "archived_tournaments" not in data:
-                        data["archived_tournaments"] = []
-                    if "settings" not in data:
-                        data["settings"] = default_db["settings"]
-                        
-                    return data
             except Exception as e:
-                logging.error(f"Ошибка загрузки БД: {e}")
-        return get_default_db()
+                logging.error(f"Ошибка чтения database.json: {e}")
+                data = None
+
+        if data is None and os.path.exists(DB_BACKUP_FILE):
+            try:
+                logging.info("Попытка загрузки из database_backup.json...")
+                with open(DB_BACKUP_FILE, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+            except Exception as e:
+                logging.error(f"Ошибка чтения database_backup.json: {e}")
+                data = None
+
+        if data is None:
+            return get_default_db()
+
+        default_db = get_default_db()
+        
+        # Проверка и добавление версии базы данных
+        if "database_version" not in data:
+            data["database_version"] = 1
+
+        # Структурная валидация ключей
+        if "active_tournament" not in data:
+            data["active_tournament"] = default_db["active_tournament"]
+        else:
+            for k, v in default_db["active_tournament"].items():
+                if k not in data["active_tournament"]:
+                    data["active_tournament"][k] = v
+
+        if "stats" not in data or "players" not in data["stats"]:
+            data["stats"] = {"players": {}}
+        if "champions" not in data:
+            data["champions"] = []
+        if "archived_tournaments" not in data:
+            data["archived_tournaments"] = []
+        if "settings" not in data:
+            data["settings"] = default_db["settings"]
+            
+        return data
 
 def save_data_internal(data):
     try:
+        if os.path.exists(DB_FILE):
+            try:
+                shutil.copy2(DB_FILE, DB_BACKUP_FILE)
+            except Exception as e:
+                logging.error(f"Ошибка создания бэкапа БД: {e}")
+
         dir_name = os.path.dirname(DB_FILE)
         with tempfile.NamedTemporaryFile('w', dir=dir_name, delete=False, encoding="utf-8") as tf:
             json.dump(data, tf, ensure_ascii=False, indent=2)
@@ -107,6 +134,17 @@ def save_data():
         save_data_internal(db)
 
 db = load_data()
+
+# Автоматическое создание/дополнение базы, если отсутствуют ключевые поля
+default_template = get_default_db()
+data_changed = False
+for key in ["active_tournament", "stats", "champions", "archived_tournaments", "settings"]:
+    if key not in db:
+        db[key] = default_template[key]
+        data_changed = True
+
+if data_changed:
+    save_data()
 
 # =====================================================================
 #  ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ И ПРОВЕРКИ
