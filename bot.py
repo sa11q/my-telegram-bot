@@ -13,6 +13,9 @@ from players import players_router
 from admin import admin_router
 from scheduler import start_scheduler, stop_scheduler
 
+# Импорт Middleware для мультиязычности (RU, KZ, UZ, EN)
+from middlewares.i18n import I18nMiddleware
+
 # ==========================================
 # НАСТРОЙКА ЛОГИРОВАНИЯ
 # ==========================================
@@ -79,6 +82,10 @@ async def main():
     
     # MemoryStorage используется для хранения состояний (FSM) в оперативной памяти
     dp = Dispatcher(storage=MemoryStorage())
+    
+    # РЕГИСТРАЦИЯ ПЕРЕВОДЧИКА (i18n)
+    # Важно: регистрируем ДО подключения роутеров, чтобы перехватывать все сообщения
+    dp.update.middleware(I18nMiddleware())
     
     # Регистрация роутеров (разделение команд админа и игроков)
     dp.include_router(admin_router)
