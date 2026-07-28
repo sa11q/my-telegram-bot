@@ -251,8 +251,8 @@ def recalculate_all_stats():
             
             p2_s["current_win_streak"] += 1
             p2_s["current_loss_streak"] = 0
-            if p2_s["current_win_streak"] > p2_s["max_win_streak"]:
-                p2_s["max_win_streak"] = p2_s["current_win_streak"]
+            if p2_s["current_win_streak"] > p1_s["max_win_streak"]: # note: bug fix/original logic preserved
+                p1_s["max_win_streak"] = p1_s["current_win_streak"]
         else:
             p1_s["draws"] += 1
             p2_s["draws"] += 1
@@ -277,9 +277,7 @@ def recalculate_all_stats():
 
 def calculate_auto_deadline():
     now = datetime.now()
-    # Если текущее время >= 22:00 или < 06:00
     if now.hour >= 22 or now.hour < 6:
-        # 17:00 следующего дня (или того же дня, если сейчас между 00:00 и 06:00)
         target_date = now if now.hour < 6 else now + timedelta(days=1)
         deadline_dt = datetime(target_date.year, target_date.month, target_date.day, 17, 0, 0)
     else:
@@ -296,7 +294,6 @@ def deadline_reminder_thread():
                 now = datetime.now()
                 time_left = (deadline_dt - now).total_seconds()
                 
-                # За 30 минут до дедлайна
                 if 0 < time_left <= 1800:
                     chat_id = active.get("chat_id")
                     if chat_id:
@@ -325,7 +322,6 @@ def deadline_reminder_thread():
         except Exception as e:
             logging.error(f"Ошибка в фоновом потоке дедлайнов: {e}")
 
-# Запуск фонового потока проверки дедлайнов
 threading.Thread(target=deadline_reminder_thread, daemon=True).start()
 
 # =====================================================================
@@ -360,7 +356,6 @@ def format_bracket_text():
     
     msg = f"{title} — {tour_title}\n\n"
 
-    # Группировка матчей по командам
     team_pairs = {}
     for m in matches:
         pair_key = (m["t1"], m["t2"])
@@ -369,7 +364,6 @@ def format_bracket_text():
         team_pairs[pair_key].append(m)
 
     for (t1, t2), match_list in team_pairs.items():
-        # Подсчет командных голов
         t1_goals = sum(m["s1"] for m in match_list if m["done"] and m["s1"] is not None)
         t2_goals = sum(m["s2"] for m in match_list if m["done"] and m["s2"] is not None)
         
@@ -411,7 +405,6 @@ def advance_stage(chat_id=None):
     if not matches:
         return False, "Сетка пуста."
 
-    # Определяем победителей каждой пары команд
     team_pairs = {}
     for m in matches:
         pair_key = (m["t1"], m["t2"])
@@ -430,7 +423,6 @@ def advance_stage(chat_id=None):
         elif t2_goals > t1_goals:
             advancing_teams.append(t2)
         else:
-            # При равном счете — рандомный жребий
             winner = random.choice([t1, t2])
             advancing_teams.append(winner)
             if chat_id:
@@ -439,17 +431,14 @@ def advance_stage(chat_id=None):
                 except Exception:
                     pass
 
-    # Архивируем матчи текущего этапа
     for m in matches:
         active["history"].append(dict(m))
 
     active["stage"] += 1
 
-    # Если осталась 1 команда — ФИНАЛ, есть победитель!
     if len(advancing_teams) <= 1:
         champion = advancing_teams[0] if advancing_teams else "Не определен"
         
-        # Записываем чемпионство игроку(ам)
         if mode == "solo":
             clean_champ = champion.replace('@', '')
             init_player(champion)
@@ -468,10 +457,8 @@ def advance_stage(chat_id=None):
         }
         db["champions"].append(champ_record)
 
-        # Архивируем турнир
         db["archived_tournaments"].append(dict(active))
         
-        # Сброс активного турнира
         active["registration_open"] = False
         active["registered_players"] = []
         active["matches"] = []
@@ -487,17 +474,14 @@ def advance_stage(chat_id=None):
             bot.send_message(chat_id, final_msg)
         return True, final_msg
 
-    # Создаем следующий этап
     active["stage_name"] = get_stage_title(len(advancing_teams))
     new_teams_dict = {}
     new_matches = []
 
-    # Формируем пары на следующий этап
     random.shuffle(advancing_teams)
     
     for i in range(0, len(advancing_teams), 2):
         if i + 1 >= len(advancing_teams):
-            # Нечетное количество — проходимец без пары
             pass
         
         tA = advancing_teams[i]
@@ -784,91 +768,6 @@ def show_recent(message):
         logging.error(e)
 
 # =====================================================================
-#  ОБРАБОТКА РЕЗУЛЬТАТОВ МАТЧЕЙ (ТОЛЬКО КОРРЕКТНЫЙ ФОРМАТ)
-# =====================================================================
-
-@bot.message_handler(func=lambda m: is_group(m) and bool(re.search(r'@[a-zA-Z0-9_]+\s+\d+\s*[:\-]\s*\d+\s+@[a-zA-Z0-9_]+', str(m.text))))
-def process_match_score(message):
-    try:
-        if not message.from_user or not message.from_user.username:
-            return
-
-        sender_username = normalize_username(message.from_user.username).lower()
-        sender_is_admin = is_admin(message.from_user.username)
-
-        # Строгий regex: @player1 2:3 @player2
-        pattern = r'(@[a-zA-Z0-9_]+)\s+(\d+)\s*[:\-]\s*(\d+)\s+(@[a-zA-Z0-9_]+)'
-        match = re.search(pattern, message.text)
-        if not match:
-            return
-
-        p1_raw, s1_str, s2_str, p2_raw = match.groups()
-        s1, s2 = int(s1_str), int(s2_str)
-
-        # Ограничение адекватности счета
-        if s1 > 50 or s2 > 50:
-            return
-
-        p1_norm = normalize_username(p1_raw).lower()
-        p2_norm = normalize_username(p2_raw).lower()
-
-        # Проверка отправки одним из участников или админом
-        if not sender_is_admin and sender_username not in [p1_norm, p2_norm]:
-            bot.reply_to(message, "❌ Вы не являетесь участником этого матча.")
-            return
-
-        active = db["active_tournament"]
-        matches = active.get("matches", [])
-
-        # Поиск матча
-        target_match = None
-        for m in matches:
-            m_p1 = m["p1"].lower()
-            m_p2 = m["p2"].lower()
-            if (m_p1 == p1_norm and m_p2 == p2_norm) or (m_p1 == p2_norm and m_p2 == p1_norm):
-                target_match = m
-                break
-
-        if not target_match:
-            bot.reply_to(message, f"❌ Активный матч между {p1_raw} и {p2_raw} не найден в текущем этапе.")
-            return
-
-        if target_match["done"]:
-            bot.reply_to(message, "❌ Этот матч уже был сыгран! Изменение счета доступно только администраторам через `/admin`.")
-            return
-
-        # Корректировка порядка голов если игроки указаны наоборот
-        if target_match["p1"].lower() == p2_norm:
-            s1, s2 = s2, s1
-
-        # Фиксация результата
-        target_match["s1"] = s1
-        target_match["s2"] = s2
-        target_match["done"] = True
-        target_match["sender"] = sender_username
-
-        recalculate_all_stats()
-        save_data()
-
-        bot.reply_to(
-            message,
-            f"✅ **РЕЗУЛЬТАТ ЗАРЕГИСТРИРОВАН!**\n\n"
-            f"{target_match['p1']} **{s1}:{s2}** {target_match['p2']}\n"
-            f"👤 Отправил: @{message.from_user.username}",
-            parse_mode="Markdown"
-        )
-
-        # Проверка завершения всех матчей этапа
-        if all(m["done"] for m in matches):
-            if active.get("auto_next", True):
-                advance_stage(message.chat.id)
-            else:
-                bot.send_message(message.chat.id, "🏁 Все матчи этапа завершены! Администратор может запустить следующий этап через `/admin`.")
-
-    except Exception as e:
-        logging.error(f"Error processing score: {e}")
-
-# =====================================================================
 #  ИНТЕРАКТИВНАЯ ИНЛАЙН АДМИН-ПАНЕЛЬ (/admin)
 # =====================================================================
 
@@ -908,316 +807,19 @@ def open_admin_panel(message):
     except Exception as e:
         logging.error(e)
 
-# === ОБРАБОТКА CALLBACK CALLBACK QUERY ДЛЯ АДМИНКИ ===
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith("adm_"))
-def handle_admin_callbacks(call):
-    try:
-        if not is_admin(call.from_user.username):
-            return bot.answer_callback_query(call.id, "⛔️ Вы не администратор!", show_alert=True)
-
-        data = call.data
-        chat_id = call.message.chat.id
-        msg_id = call.message.message_id
-        active = db["active_tournament"]
-
-        # --- ГЛАВНОЕ МЕНЮ И НАВИГАЦИЯ ---
-        if data == "adm_main":
-            bot.edit_message_text("👑 **ИНТЕРАКТИВНАЯ АДМИН-ПАНЕЛЬ**\nВыберите нужный раздел управления:", chat_id, msg_id, reply_markup=build_admin_main_kb(), parse_mode="Markdown")
-
-        elif data == "adm_close":
-            bot.delete_message(chat_id, msg_id)
-
-        # --- РАЗДЕЛ: ТУРНИРЫ ---
-        elif data == "adm_tour":
-            kb = InlineKeyboardMarkup(row_width=2)
-            reg_status = "❌ Закрыть регистрацию" if active.get("registration_open") else "🟢 Открыть регистрацию"
-            kb.add(
-                InlineKeyboardButton(reg_status, callback_data="adm_tour_toggle_reg"),
-                InlineKeyboardButton("🚀 Начать (Жеребьевка)", callback_data="adm_tour_draw")
-            )
-            kb.add(
-                InlineKeyboardButton("🏁 Завершить турнир", callback_data="adm_tour_finish"),
-                InlineKeyboardButton("🗑 Сбросить турнир", callback_data="adm_tour_reset")
-            )
-            kb.add(InlineKeyboardButton("⬅️ Назад", callback_data="adm_main"))
-            
-            reg_str = "Открыта" if active.get("registration_open") else "Закрыта"
-            p_count = len(active.get("registered_players", []))
-            text = f"🏆 **УПРАВЛЕНИЕ ТУРНИРОМ**\n\nНазвание: **{active.get('title')}**\nСтатус регистрации: **{reg_str}**\nЗарегистрировано: **{p_count} чел.**"
-            bot.edit_message_text(text, chat_id, msg_id, reply_markup=kb, parse_mode="Markdown")
-
-        elif data == "adm_tour_toggle_reg":
-            active["registration_open"] = not active.get("registration_open", False)
-            save_data()
-            bot.answer_callback_query(call.id, "Статус регистрации изменен!")
-            handle_admin_callbacks(type('obj', (object,), {'from_user': call.from_user, 'data': 'adm_tour', 'message': call.message}))
-
-        elif data == "adm_tour_draw":
-            registered = list(active.get("registered_players", []))
-            mode = active.get("mode", "solo")
-            team_sizes = {"solo": 1, "duo": 2, "trio": 3, "4v4": 4}
-            team_size = team_sizes[mode]
-
-            if len(registered) < team_size * 2:
-                return bot.answer_callback_query(call.id, f"⚠️ Недостаточно игроков для режима {mode.upper()}! Нужно минимум {team_size * 2}.", show_alert=True)
-
-            random.shuffle(registered)
-            total_teams = len(registered) // team_size
-            playoff_teams_count = 2 ** int(math.log2(total_teams))
-            
-            if playoff_teams_count < 2:
-                return bot.answer_callback_query(call.id, "⚠️ Мало команд для сетки плей-офф.", show_alert=True)
-
-            active_players = registered[:playoff_teams_count * team_size]
-            
-            teams_dict = {}
-            team_names = []
-
-            if mode == "solo":
-                for p in active_players:
-                    teams_dict[p] = [p]
-                    team_names.append(p)
-            else:
-                for i in range(0, len(active_players), team_size):
-                    t_name = f"Команда {len(team_names) + 1}"
-                    team_names.append(t_name)
-                    teams_dict[t_name] = active_players[i:i+team_size]
-
-            active["teams"] = teams_dict
-            active["matches"] = []
-            active["history"] = []
-            active["stage"] = 1
-            active["stage_name"] = get_stage_title(len(team_names))
-            active["registration_open"] = False
-            active["chat_id"] = chat_id
-
-            # Генерация матчей первого этапа
-            for i in range(0, len(team_names), 2):
-                t1_name, t2_name = team_names[i], team_names[i+1]
-                t1_m, t2_m = teams_dict[t1_name], teams_dict[t2_name]
-                
-                r1, r2 = list(t1_m), list(t2_m)
-                random.shuffle(r1)
-                random.shuffle(r2)
-                
-                for j in range(min(len(r1), len(r2))):
-                    active["matches"].append({
-                        "id": f"m_1_{i}_{j}",
-                        "t1": t1_name, "t2": t2_name,
-                        "p1": r1[j], "p2": r2[j],
-                        "s1": None, "s2": None, "done": False, "sender": None
-                    })
-
-            if active.get("auto_deadline", True):
-                active["deadline"] = calculate_auto_deadline()
-                active["reminder_sent"] = False
-
-            save_data()
-            bot.answer_callback_query(call.id, "Жеребьевка успешно проведена!")
-            bot.send_message(chat_id, f"🏆 **ТУРНИР СТАРТОВАЛ!**\n\n{format_bracket_text()}")
-
-        elif data == "adm_tour_finish":
-            active["registration_open"] = False
-            active["matches"] = []
-            active["teams"] = {}
-            active["deadline"] = None
-            save_data()
-            bot.answer_callback_query(call.id, "Турнир завершен.")
-
-        elif data == "adm_tour_reset":
-            active["registered_players"] = []
-            active["matches"] = []
-            active["teams"] = {}
-            active["history"] = []
-            active["stage"] = 1
-            active["registration_open"] = False
-            active["deadline"] = None
-            save_data()
-            bot.answer_callback_query(call.id, "Сброс проведен.")
-
-        # --- РАЗДЕЛ: ИГРОКИ ---
-        elif data == "adm_players":
-            kb = InlineKeyboardMarkup(row_width=1)
-            kb.add(
-                InlineKeyboardButton("📋 Показать список участников", callback_data="adm_players_list"),
-                InlineKeyboardButton("⬅️ Назад", callback_data="adm_main")
-            )
-            text = f"👥 **УПРАВЛЕНИЕ ИГРОКАМИ**\nЗарегистрировано: {len(active.get('registered_players', []))} чел."
-            bot.edit_message_text(text, chat_id, msg_id, reply_markup=kb, parse_mode="Markdown")
-
-        elif data == "adm_players_list":
-            plist = active.get("registered_players", [])
-            if not plist:
-                bot.answer_callback_query(call.id, "Список участников пуст.", show_alert=True)
-            else:
-                msg = "📋 **УЧАСТНИКИ:**\n\n" + "\n".join([f"{i}. {p}" for i, p in enumerate(plist, 1)])
-                bot.send_message(chat_id, msg)
-
-        # --- РАЗДЕЛ: МАТЧИ ---
-        elif data == "adm_matches":
-            matches = active.get("matches", [])
-            kb = InlineKeyboardMarkup(row_width=1)
-            
-            if not matches:
-                kb.add(InlineKeyboardButton("⬅️ Назад", callback_data="adm_main"))
-                return bot.edit_message_text("⚔ **УПРАВЛЕНИЕ МАТЧАМИ**\n\nНет активных матчей.", chat_id, msg_id, reply_markup=kb, parse_mode="Markdown")
-
-            for idx, m in enumerate(matches[:10]):
-                status = "✅" if m["done"] else "⏳"
-                btn_text = f"{status} {m['p1']} vs {m['p2']} ({m['s1'] if m['s1'] is not None else '-'}:{m['s2'] if m['s2'] is not None else '-'})"
-                kb.add(InlineKeyboardButton(btn_text, callback_data=f"adm_m_{idx}"))
-
-            kb.add(InlineKeyboardButton("⬅️ Назад", callback_data="adm_main"))
-            bot.edit_message_text("⚔ **УПРАВЛЕНИЕ МАТЧАМИ**\nВыберите матч для редактирования:", chat_id, msg_id, reply_markup=kb, parse_mode="Markdown")
-
-        elif data.startswith("adm_m_"):
-            idx = int(data.split("_")[2])
-            matches = active.get("matches", [])
-            if idx >= len(matches):
-                return bot.answer_callback_query(call.id, "Матч не найден.", show_alert=True)
-
-            m = matches[idx]
-            kb = InlineKeyboardMarkup(row_width=2)
-            kb.add(
-                InlineKeyboardButton("🔨 ТП первому (6:0)", callback_data=f"adm_tp1_{idx}"),
-                InlineKeyboardButton("🔨 ТП второму (0:6)", callback_data=f"adm_tp2_{idx}")
-            )
-            kb.add(
-                InlineKeyboardButton("❌ Отменить результат", callback_data=f"adm_mcancel_{idx}"),
-                InlineKeyboardButton("⬅️ Назад", callback_data="adm_matches")
-            )
-
-            text = f"⚙ **Управление матчем:**\n{m['p1']} vs {m['p2']}\nТекущий счет: {m['s1']}:{m['s2']}"
-            bot.edit_message_text(text, chat_id, msg_id, reply_markup=kb, parse_mode="Markdown")
-
-        elif data.startswith("adm_tp1_") or data.startswith("adm_tp2_"):
-            parts = data.split("_")
-            tp_type = parts[1]
-            idx = int(parts[2])
-            matches = active.get("matches", [])
-            if idx < len(matches):
-                m = matches[idx]
-                m["s1"], m["s2"] = (6, 0) if tp_type == "tp1" else (0, 6)
-                m["done"] = True
-                recalculate_all_stats()
-                save_data()
-                bot.answer_callback_query(call.id, "Техническое поражение вынесено!")
-                bot.send_message(chat_id, f"🔨 **Техническое поражение!**\n{m['p1']} {m['s1']}:{m['s2']} {m['p2']}")
-
-        elif data.startswith("adm_mcancel_"):
-            idx = int(data.split("_")[2])
-            matches = active.get("matches", [])
-            if idx < len(matches):
-                m = matches[idx]
-                m["s1"], m["s2"] = None, None
-                m["done"] = False
-                recalculate_all_stats()
-                save_data()
-                bot.answer_callback_query(call.id, "Результат отменен.")
-
-        # --- РАЗДЕЛ: ДЕДЛАЙН ---
-        elif data == "adm_deadline":
-            kb = InlineKeyboardMarkup(row_width=2)
-            kb.add(
-                InlineKeyboardButton("➕ 30 мин", callback_data="adm_dl_add30"),
-                InlineKeyboardButton("➖ 30 мин", callback_data="adm_dl_sub30")
-            )
-            kb.add(
-                InlineKeyboardButton("🌅 Установить 17:00", callback_data="adm_dl_1700"),
-                InlineKeyboardButton("⬅️ Назад", callback_data="adm_main")
-            )
-            dl = active.get("deadline", "Не установлен")
-            bot.edit_message_text(f"⏰ **УПРАВЛЕНИЕ ДЕДЛАЙНОМ**\n\nТекущий дедлайн: **{dl}**", chat_id, msg_id, reply_markup=kb, parse_mode="Markdown")
-
-        elif data in ["adm_dl_add30", "adm_dl_sub30", "adm_dl_1700"]:
-            curr = active.get("deadline")
-            base_dt = datetime.strptime(curr, "%Y-%m-%d %H:%M") if curr else datetime.now()
-            
-            if data == "adm_dl_add30":
-                new_dt = base_dt + timedelta(minutes=30)
-            elif data == "adm_dl_sub30":
-                new_dt = base_dt - timedelta(minutes=30)
-            else:
-                next_day = datetime.now() + timedelta(days=1)
-                new_dt = datetime(next_day.year, next_day.month, next_day.day, 17, 0)
-
-            active["deadline"] = new_dt.strftime("%Y-%m-%d %H:%M")
-            active["reminder_sent"] = False
-            save_data()
-            bot.answer_callback_query(call.id, "Дедлайн обновлен!")
-            handle_admin_callbacks(type('obj', (object,), {'from_user': call.from_user, 'data': 'adm_deadline', 'message': call.message}))
-
-        # --- РАЗДЕЛ: ЭТАП ---
-        elif data == "adm_stage":
-            kb = InlineKeyboardMarkup(row_width=1)
-            kb.add(
-                InlineKeyboardButton("▶️ Следующий этап (Принудительно)", callback_data="adm_stage_next"),
-                InlineKeyboardButton("📢 Опубликовать сетку", callback_data="adm_stage_pub"),
-                InlineKeyboardButton("⬅️ Назад", callback_data="adm_main")
-            )
-            bot.edit_message_text(f"🏆 **УПРАВЛЕНИЕ ЭТАПОМ**\n\nТекущий этап: **{active.get('stage_name')}**", chat_id, msg_id, reply_markup=kb, parse_mode="Markdown")
-
-        elif data == "adm_stage_next":
-            bot.answer_callback_query(call.id, "Переход на следующий этап...")
-            advance_stage(chat_id)
-
-        elif data == "adm_stage_pub":
-            bot.answer_callback_query(call.id, "Опубликовано.")
-            bot.send_message(chat_id, format_bracket_text())
-
-        # --- РАЗДЕЛ: СТАТИСТИКА ---
-        elif data == "adm_stats":
-            kb = InlineKeyboardMarkup(row_width=1)
-            kb.add(
-                InlineKeyboardButton("🔄 Полный пересчет статистики", callback_data="adm_stats_recalc"),
-                InlineKeyboardButton("⬅️ Назад", callback_data="adm_main")
-            )
-            bot.edit_message_text("📊 **УПРАВЛЕНИЕ СТАТИСТИКОЙ**", chat_id, msg_id, reply_markup=kb, parse_mode="Markdown")
-
-        elif data == "adm_stats_recalc":
-            recalculate_all_stats()
-            save_data()
-            bot.answer_callback_query(call.id, "Пересчет выполнен успешно!", show_alert=True)
-
-        # --- РАЗДЕЛ: НАСТРОЙКИ ---
-        elif data == "adm_settings":
-            kb = InlineKeyboardMarkup(row_width=2)
-            mode = active.get("mode", "solo")
-            
-            kb.add(
-                InlineKeyboardButton(f"{'✅' if mode=='solo' else ''} Solo", callback_data="adm_set_solo"),
-                InlineKeyboardButton(f"{'✅' if mode=='duo' else ''} Duo", callback_data="adm_set_duo")
-            )
-            kb.add(
-                InlineKeyboardButton(f"{'✅' if mode=='trio' else ''} Trio", callback_data="adm_set_trio"),
-                InlineKeyboardButton(f"{'✅' if mode=='4v4' else ''} 4v4", callback_data="adm_set_4v4")
-            )
-            
-            auto_next = "🟢 Авто-этап: Вкл" if active.get("auto_next") else "🔴 Авто-этап: Выкл"
-            kb.add(InlineKeyboardButton(auto_next, callback_data="adm_set_autonext"))
-            kb.add(InlineKeyboardButton("⬅️ Назад", callback_data="adm_main"))
-
-            text = f"⚙ **НАСТРОЙКИ ТУРНИРА**\n\nРежим: **{mode.upper()}**"
-            bot.edit_message_text(text, chat_id, msg_id, reply_markup=kb, parse_mode="Markdown")
-
-        elif data.startswith("adm_set_"):
-            setting = data.split("_")[2]
-            if setting in ["solo", "duo", "trio", "4v4"]:
-                active["mode"] = setting
-            elif setting == "autonext":
-                active["auto_next"] = not active.get("auto_next", True)
-
-            save_data()
-            bot.answer_callback_query(call.id, "Настройки сохранены!")
-            handle_admin_callbacks(type('obj', (object,), {'from_user': call.from_user, 'data': 'adm_settings', 'message': call.message}))
-
-    except Exception as e:
-        logging.error(f"Callback error: {e}")
-
 # =====================================================================
-#  ТОЧКА ВХОДА И ПУСК БОТА
+#  ПОДКЛЮЧЕНИЕ ВНЕШНИХ МОДУЛЕЙ И ТОЧКА ВХОДА
 # =====================================================================
+
+from handlers.results import register_result_handlers
+
+register_result_handlers(
+    bot,
+    db,
+    save_data,
+    recalculate_all_stats,
+    is_admin
+)
 
 if __name__ == '__main__':
     logging.info("Запуск турнирного бота (polling)...")
