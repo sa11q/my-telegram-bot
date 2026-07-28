@@ -6,6 +6,7 @@ import json
 import threading
 import time
 import random
+import math
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 # 1. Логирование
@@ -102,8 +103,9 @@ def send_welcome(message):
         bot.reply_to(
             message, 
             "✅ **Бот запущен**\n\n"
-            "• `/collect` — список юзернеймов\n"
-            "• `/results` [текст] — введение результатов матчей\n"
+            "• `/collect` — список собранных юзернеймов\n"
+            "• `/draw` [соло/дуо/трио/4-4] [число] — провести жеребьевку\n"
+            "• `/results` [текст] — ввести результаты матчей\n"
             "• `/top` [число] — Elo рейтинг участников\n"
             "• `/stats` — отдельная статистика турнира"
         )
@@ -126,6 +128,127 @@ def collect_comments(message):
         bot.reply_to(message, response_text, parse_mode="Markdown")
     except Exception as e:
         logging.error(f"Ошибка в /collect: {e}")
+
+# ================= ЖЕРЕБЬЕВКА (СОЛО, ДУО, ТРИО, 4v4) =================
+
+@bot.message_handler(commands=['draw'])
+def make_draw(message):
+    try:
+        if not is_admin(message):
+            return
+        
+        thread_id = get_thread_id(message)
+        collected = list(posts_data.get(thread_id, set()))
+        
+        if not collected:
+            bot.reply_to(message, "📭 Под этой веткой/постом нет собранных участников.")
+            return
+
+        args = message.text.split()[1:]
+        mode = "solo"
+        custom_limit = None
+
+        for arg in args:
+            arg_lower = arg.lower()
+            if arg_lower in ["solo", "соло", "1v1", "1-1"]:
+                mode = "solo"
+            elif arg_lower in ["duo", "дуо", "2v2", "2-2"]:
+                mode = "duo"
+            elif arg_lower in ["trio", "трио", "3v3", "3-3"]:
+                mode = "trio"
+            elif arg_lower in ["4v4", "4-4", "quad", "квартет", "squad"]:
+                mode = "4v4"
+            elif arg.isdigit():
+                custom_limit = int(arg)
+
+        team_sizes = {"solo": 1, "duo": 2, "trio": 3, "4v4": 4}
+        mode_names = {"solo": "Соло", "duo": "Дуо", "trio": "Трио", "4v4": "4v4"}
+        
+        team_size = team_sizes[mode]
+        mode_title = mode_names[mode]
+
+        # Перемешиваем игроков
+        random.shuffle(collected)
+
+        total_available = len(collected)
+        if custom_limit and custom_limit < total_available:
+            total_available = custom_limit
+
+        total_teams = total_available // team_size
+
+        if total_teams < 2:
+            bot.reply_to(message, f"⚠️ Недостаточно участников для режима {mode_title}. Нужно минимум {team_size * 2} чел.")
+            return
+
+        # Находим наибольшую степень 2 (например, из 17 команд берем 16)
+        playoff_teams_count = 2 ** int(math.log2(total_teams))
+        players_needed = playoff_teams_count * team_size
+
+        active_players = collected[:players_needed]
+        reserve_players = collected[players_needed:]
+
+        # Определяем стадию турнира
+        if playoff_teams_count == 2:
+            stage_name = "Финал"
+        elif playoff_teams_count == 4:
+            stage_name = "1/2 Финала"
+        elif playoff_teams_count == 8:
+            stage_name = "1/4 Финала"
+        elif playoff_teams_count == 16:
+            stage_name = "1/8 Финала"
+        elif playoff_teams_count == 32:
+            stage_name = "1/16 Финала"
+        elif playoff_teams_count == 64:
+            stage_name = "1/32 Финала"
+        else:
+            stage_name = f"1/{playoff_teams_count // 2} Финала"
+
+        msg = f"🏆 Жеребьевка ({mode_title}) — {stage_name}\n\n"
+
+        if mode == "solo":
+            match_num = 1
+            for i in range(0, len(active_players), 2):
+                p1 = active_players[i]
+                p2 = active_players[i+1]
+                msg += f"{match_num}. {p1} vs {p2}\n"
+                match_num += 1
+        else:
+            teams = []
+            for i in range(0, len(active_players), team_size):
+                team_members = active_players[i:i+team_size]
+                teams.append(team_members)
+            
+            # Сохраняем составы в оперативку/базу
+            for t_idx, team_members in enumerate(teams, 1):
+                t_name = f"Команда {t_idx}"
+                tour_stats["teams"][t_name] = team_members
+
+            save_data()
+
+            for i in range(0, len(teams), 2):
+                t1_members = teams[i]
+                t2_members = teams[i+1]
+                t1_name = f"Команда {i+1}"
+                t2_name = f"Команда {i+2}"
+
+                msg += f"{t1_name} vs {t2_name}\n"
+                msg += f"{t1_name}: {', '.join(t1_members)}\n"
+                msg += f"{t2_name}: {', '.join(t2_members)}\n\n"
+
+        if reserve_players:
+            msg += f"\n⚠️ Запасные ({len(reserve_players)}):\n"
+            msg += ", ".join(reserve_players)
+
+        if len(msg) <= 4000:
+            bot.reply_to(message, msg)
+        else:
+            chunks = [msg[i:i+4000] for i in range(0, len(msg), 4000)]
+            for chunk in chunks:
+                bot.send_message(message.chat.id, chunk)
+
+    except Exception as e:
+        logging.error(f"Ошибка в /draw: {e}")
+        bot.reply_to(message, "❌ Ошибка при проведении жеребьевки.")
 
 # ================= РЕЗУЛЬТАТЫ И СЕТКА =================
 
@@ -220,9 +343,7 @@ def process_results(message):
                 next_stage_text += f"{rosterA[j]} vs {rosterB[j]}\n"
             next_stage_text += "\n"
 
-        next_stage_text += "🔴 Дедлайн → 22:00"
-        
-        bot.reply_to(message, next_stage_text, parse_mode="Markdown")
+        bot.reply_to(message, next_stage_text.strip(), parse_mode="Markdown")
         
     except Exception as e:
         logging.error(f"Ошибка в /results: {e}")
@@ -250,7 +371,6 @@ def show_top(message):
 
         full_text = "\n".join(lines)
 
-        # Отправка с учетом лимита длины сообщения Telegram (4096 символов)
         if len(full_text) <= 4000:
             bot.reply_to(message, full_text)
         else:
@@ -276,20 +396,15 @@ def show_stats(message):
             bot.reply_to(message, "📊 Статистика пока пуста.")
             return
 
-        # Фильтруем игроков, сыгравших хотя бы 1 матч
         active_players = [p for p in players.items() if p[1]["matches"] > 0]
         
         if not active_players:
             bot.reply_to(message, "📊 Матчи еще не были сыграны.")
             return
 
-        # Сортировка по забитым голам (Бомбардиры)
         top_scorers = sorted(active_players, key=lambda x: x[1]["goals_scored"], reverse=True)[:5]
-        
-        # Сортировка по пропущенным голам (Меньше = лучше)
         top_defenders = sorted(active_players, key=lambda x: x[1]["goals_conceded"])[:5]
 
-        # Подсчет общих показателей
         total_matches = sum(p[1]["matches"] for p in players.values()) // 2
         total_goals = sum(p[1]["goals_scored"] for p in players.values())
 
