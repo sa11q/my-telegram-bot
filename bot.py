@@ -1,431 +1,105 @@
 import asyncio
-import signal
-import sys
+import logging
+from logging.handlers import RotatingFileHandler
+import os
 
-from telebot.async_telebot import AsyncTeleBot
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from aiogram import Bot, Dispatcher
+from aiogram.fsm.storage.memory import MemoryStorage
 
-from config import config
+# Импорты из наших будущих модулей
+from config import BOT_TOKEN, ADMIN_IDS
+from database import init_db, close_db
+from players import players_router
+from admin import admin_router
+from scheduler import start_scheduler, stop_scheduler
 
-from utils.logger import (
-    bot_logger,
-    error_logger
-)
-
-from database.database import get_repository
-
-from database.postgres import PostgresRepository
-
-from redis.redis_storage import RedisStorage
-
-
-# =====================================
-# BOT INSTANCE
-# =====================================
-
-bot = AsyncTeleBot(
-    config.BOT_TOKEN
-)
-
-
-# =====================================
-# STORAGE
-# =====================================
-
-redis_storage = RedisStorage(
-    host=config.REDIS_HOST,
-    port=config.REDIS_PORT,
-    db=config.REDIS_DB
-)
-
-
-# =====================================
-# DATABASE
-# =====================================
-
-if config.DB_TYPE.lower() == "postgres":
-
-    database = PostgresRepository(
-        config.POSTGRES_URL
+# ==========================================
+# НАСТРОЙКА ЛОГИРОВАНИЯ
+# ==========================================
+def setup_logging():
+    """Создает папку логов и настраивает ротацию файлов (максимум 5 файлов по 5 МБ)"""
+    if not os.path.exists("logs"):
+        os.makedirs("logs")
+        
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+        handlers=[
+            RotatingFileHandler(
+                "logs/bot.log", 
+                maxBytes=5_000_000, 
+                backupCount=5, 
+                encoding="utf-8"
+            ),
+            logging.StreamHandler() # Вывод логов в консоль
+        ]
     )
 
-else:
-
-    database = get_repository(
-        "json",
-        config.JSON_DB_PATH
-    )
-
-
-
-# =====================================
-# SCHEDULER
-# =====================================
-
-scheduler = AsyncIOScheduler()
-
-
-
-# =====================================
-# SERVICES CONTAINER
-# =====================================
-
-class Container:
-    """
-    Центральное хранилище зависимостей.
-    Все handlers/services получают отсюда
-    нужные объекты.
-    """
-
-
-    db = database
-
-    redis = redis_storage
-
-    scheduler = scheduler
-
-
-
-container = Container()
-
-
-
-# =====================================
-# HANDLERS LOADER
-# =====================================
-
-def register_handlers():
-
-    """
-    Здесь подключаются все Telegram handlers.
-
-    Когда создадим:
-    handlers/admin.py
-    handlers/tournaments.py
-    handlers/matches.py
-
-    просто добавим импорт сюда.
-    """
-
-
-    try:
-
-        from handlers.admin import register_admin_handlers
-
-        register_admin_handlers(
-            bot,
-            container
-        )
-
-
-    except ImportError:
-
-        bot_logger.warning(
-            "Admin handlers not found"
-        )
-
-
-
-    try:
-
-        from handlers.players import register_player_handlers
-
-        register_player_handlers(
-            bot,
-            container
-        )
-
-
-    except ImportError:
-
-        bot_logger.warning(
-            "Player handlers not found"
-        )
-
-
-
-    try:
-
-        from handlers.tournaments import register_tournament_handlers
-
-        register_tournament_handlers(
-            bot,
-            container
-        )
-
-
-    except ImportError:
-
-        bot_logger.warning(
-            "Tournament handlers not found"
-        )
-
-
-
-    try:
-
-        from handlers.matches import register_match_handlers
-
-        register_match_handlers(
-            bot,
-            container
-        )
-
-
-    except ImportError:
-
-        bot_logger.warning(
-            "Match handlers not found"
-        )
-
-
-
-# =====================================
-# BASIC COMMANDS
-# =====================================
-
-
-@bot.message_handler(
-    commands=["start"]
-)
-async def start(message):
-
-    await bot.reply_to(
-        message,
-        (
-            "🏆 Tournament Engine запущен\n\n"
-            "Используйте /help"
-        )
-    )
-
-
-
-@bot.message_handler(
-    commands=["help"]
-)
-async def help_command(message):
-
-    await bot.reply_to(
-        message,
-        (
-            "🤖 Команды:\n\n"
-            "/profile — профиль\n"
-            "/rank — рейтинг\n"
-            "/tournaments — турниры"
-        )
-    )
-
-
-
-# =====================================
-# STARTUP
-# =====================================
-
-
-async def startup():
-
-
-    bot_logger.info(
-        "Starting Tournament Engine..."
-    )
-
-
-    # PostgreSQL
-
-    if isinstance(
-        database,
-        PostgresRepository
-    ):
-
-        await database.connect()
-
-        bot_logger.info(
-            "PostgreSQL connected"
-        )
-
-
-    else:
-
-        bot_logger.info(
-            "JSON Database enabled"
-        )
-
-
-
-    # Redis
-
-    redis_ok = await redis_storage.ping()
-
-
-    if redis_ok:
-
-        bot_logger.info(
-            "Redis connected"
-        )
-
-    else:
-
-        error_logger.error(
-            "Redis unavailable"
-        )
-
-
-
-    # Handlers
-
-    register_handlers()
-
-
-    # Scheduler
-
-    scheduler.start()
-
-
-    bot_logger.info(
-        "Scheduler started"
-    )
-
-
-
-    bot_logger.info(
-        "Bot initialization complete"
-    )
-
-
-
-# =====================================
-# SHUTDOWN
-# =====================================
-
-
-async def shutdown():
-
-
-    bot_logger.info(
-        "Shutdown started..."
-    )
-
-
-    try:
-
-        scheduler.shutdown()
-
-
-    except Exception:
-        pass
-
-
-
-    try:
-
-        await redis_storage.close()
-
-
-    except Exception:
-        pass
-
-
-
-    if isinstance(
-        database,
-        PostgresRepository
-    ):
-
-        await database.disconnect()
-
-
-
-    bot_logger.info(
-        "Shutdown completed"
-    )
-
-
-
-# =====================================
-# SIGNALS
-# =====================================
-
-
-def setup_signals(loop):
-
-
-    async def stop():
-
-        await shutdown()
-
-        loop.stop()
-
-
-
-    for sig in (
-        signal.SIGINT,
-        signal.SIGTERM
-    ):
-
-        loop.add_signal_handler(
-            sig,
-            lambda: asyncio.create_task(stop())
-        )
-
-
-
-# =====================================
-# MAIN
-# =====================================
-
-
+logger = logging.getLogger(__name__)
+
+# ==========================================
+# ЖИЗНЕННЫЙ ЦИКЛ БОТА
+# ==========================================
+async def on_startup(bot: Bot):
+    """Выполняется при запуске бота"""
+    logger.info("Инициализация базы данных SQLite...")
+    await init_db()
+    
+    logger.info("Запуск фонового планировщика (дедлайны)...")
+    await start_scheduler(bot)
+    
+    logger.info("Бот успешно запущен!")
+    
+    # Уведомление админов о запуске (опционально)
+    for admin_id in ADMIN_IDS:
+        try:
+            await bot.send_message(admin_id, "✅ Система турниров успешно запущена и готова к работе!")
+        except Exception as e:
+            logger.warning(f"Не удалось отправить уведомление админу {admin_id}: {e}")
+
+async def on_shutdown(bot: Bot):
+    """Выполняется перед выключением бота (graceful shutdown)"""
+    logger.info("Остановка планировщика дедлайнов...")
+    await stop_scheduler()
+    
+    logger.info("Закрытие соединений с базой данных...")
+    await close_db()
+    
+    logger.info("Бот корректно остановлен.")
+
+# ==========================================
+# ГЛАВНАЯ ФУНКЦИЯ ЗАПУСКА
+# ==========================================
 async def main():
-
-
-    await startup()
-
-
-    loop = asyncio.get_running_loop()
-
-
-    setup_signals(
-        loop
-    )
-
-
+    setup_logging()
+    
+    # Инициализация бота и диспетчера
+    # parse_mode="HTML" позволяет использовать <b>, <i> и <code> в текстах
+    bot = Bot(token=BOT_TOKEN, parse_mode="HTML")
+    
+    # MemoryStorage используется для хранения состояний (FSM) в оперативной памяти
+    dp = Dispatcher(storage=MemoryStorage())
+    
+    # Регистрация роутеров (разделение команд админа и игроков)
+    dp.include_router(admin_router)
+    dp.include_router(players_router)
+    
+    # Регистрация хуков жизненного цикла
+    dp.startup.register(on_startup)
+    dp.shutdown.register(on_shutdown)
+    
+    # Сбрасываем накопившиеся апдейты, чтобы бот не обрабатывал 
+    # старые сообщения после перезапуска/обновления
+    await bot.delete_webhook(drop_pending_updates=True)
+    
+    logger.info("Запуск polling...")
     try:
-
-        bot_logger.info(
-            "Polling started"
-        )
-
-
-        await bot.infinity_polling(
-            timeout=90,
-            request_timeout=90
-        )
-
-
-    except Exception as e:
-
-
-        error_logger.exception(
-            f"Polling error: {e}"
-        )
-
-
+        await dp.start_polling(bot)
     finally:
-
-        await shutdown()
-
-
+        await bot.session.close()
 
 if __name__ == "__main__":
-
-
     try:
-
-        asyncio.run(
-            main()
-        )
-
-
-    except KeyboardInterrupt:
-
-
-        sys.exit(0)
+        asyncio.run(main())
+    except (KeyboardInterrupt, SystemExit):
+        logger.info("Остановка программы вручную (Ctrl+C).")
