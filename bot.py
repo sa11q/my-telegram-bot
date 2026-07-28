@@ -3,11 +3,8 @@ import logging
 import os
 import re
 import json
-import threading
-import time
 import random
 import math
-from http.server import BaseHTTPRequestHandler, HTTPServer
 
 # 1. Логирование
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -18,7 +15,10 @@ TOKEN = "8876079721:AAFMECzB5jkywB1J8ks66qgXg_YMzDMD6dU"
 
 bot = telebot.TeleBot(TOKEN)
 ADMINS = ['wonti9', 'avelon67', 'nupik91']
-DB_FILE = "database.json"
+
+# Фиксированный путь к файлу базы данных в папке проекта для надежности на Railway
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DB_FILE = os.path.join(BASE_DIR, "database.json")
 
 def load_data():
     if os.path.exists(DB_FILE):
@@ -57,7 +57,6 @@ def is_admin(message):
     return False
 
 def get_thread_id(message):
-    """Привязка идет к ID поста, реплая или топика"""
     if message.reply_to_message:
         return message.reply_to_message.message_id
     if message.message_thread_id:
@@ -113,8 +112,6 @@ def process_match_result(p1, p2, s1, s2):
             save_data()
             return True
     return False
-
-# ================= АДМИНСКИЙ СБОР ЧЕРЕЗ /collect =================
 
 @bot.message_handler(commands=['collect'])
 def admin_collect_players(message):
@@ -181,14 +178,12 @@ def show_collected_list(message):
     except Exception as e:
         logging.error(f"List error: {e}")
 
-# ================= СТАРТ И ЖЕРЕБЬЕВКА =================
-
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
     try:
         bot.reply_to(
             message, 
-            "✅ Бот запущен (Tournament System)\n\n"
+            "✅ Бот запущен (Railway Tournament System)\n\n"
             "👤 ИГРОКАМ:\n"
             "• `/profile` — твой турнирный паспорт\n"
             "• `/vs` — найти текущего соперника\n"
@@ -281,8 +276,6 @@ def make_draw(message):
         bot.reply_to(message, msg)
     except Exception as e:
         logging.error(f"Draw error: {e}")
-
-# ================= РЕЗУЛЬТАТЫ И ПЛЕЙ-ОФФ =================
 
 @bot.message_handler(commands=['results'])
 def process_admin_results(message):
@@ -498,25 +491,8 @@ def show_stats(message):
         bot.reply_to(message, msg + f"\n📌 Матчей сыграно: {sum(p[1]['matches'] for p in players) // 2}\n📌 Забито голов: {sum(p[1]['goals_scored'] for p in players)}")
     except Exception as e: logging.error(e)
 
-# ================= СЕРВЕР RENDER =================
-
-class DummyHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.end_headers()
-        self.wfile.write(b"OK")
-    def log_message(self, format, *args):
-        pass
-
-def run_web_server():
-    port = int(os.environ.get("PORT", 10000))
-    server = HTTPServer(('0.0.0.0', port), DummyHandler)
-    logging.info(f"Веб-сервер запущен на порту {port}")
-    server.serve_forever()
-
 if __name__ == '__main__':
-    threading.Thread(target=run_web_server, daemon=True).start()
-    logging.info("Старт бота (polling)...")
+    logging.info("Старт бота на Railway (polling)...")
     while True:
         try:
             bot.infinity_polling(timeout=20, long_polling_timeout=10)
