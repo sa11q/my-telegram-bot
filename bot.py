@@ -1100,3 +1100,5 @@ if __name__ == '__main__':
         except Exception as e:
             logging.error(f"Сбой polling: {e}. Перезапуск через 5 секунд...")
             time.sleep(5)
+from tournament_linker.handlers import register_tournament_handlers
+register_tournament_handlers(bot)
