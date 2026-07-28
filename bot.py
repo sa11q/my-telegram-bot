@@ -17,7 +17,7 @@ TOKEN = "8876079721:AAFMECzB5jkywB1J8ks66qgXg_YMzDMD6dU"
 bot = telebot.TeleBot(TOKEN)
 ADMINS = ['wonti9', 'avelon67', 'nupik91']
 
-# Фиксированный путь к файлу базы данных в папке проекта для надежности на Railway
+# Фиксированный путь к файлу базы данных в папке проекта
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_FILE = os.path.join(BASE_DIR, "database.json")
 
@@ -114,55 +114,40 @@ def process_match_result(p1, p2, s1, s2):
             return True
     return False
 
-# ==================== УПРАВЛЕНИЕ СПИСКОМ (СБОР) ====================
+# ==================== РЕГИСТРАЦИЯ И УПРАВЛЕНИЕ УЧАСТНИКАМИ ====================
 
-@bot.message_handler(commands=['collect'])
-def admin_collect_players(message):
+@bot.message_handler(commands=['join'])
+def player_join(message):
     try:
-        if not is_admin(message):
-            bot.reply_to(message, "⛔️ Команда `/collect` доступна только администраторам.")
+        if not message.from_user:
             return
 
-        if not message.reply_to_message:
-            bot.reply_to(message, "⚠️ Эту команду нужно отправлять **в ответ (реплаем)** на пост-анонс турнира!")
+        if not message.from_user.username:
+            bot.reply_to(message, "⚠️ У вас не установлен username в Telegram. Пожалуйста, установите его в настройках профиля, чтобы зарегистрироваться.")
             return
 
+        username = f"@{message.from_user.username}"
         thread_id = get_thread_id(message)
+
         if thread_id not in posts_data:
             posts_data[thread_id] = set()
 
-        target_msg = message.reply_to_message
-        collected_usernames = set()
+        if username in posts_data[thread_id]:
+            bot.reply_to(message, f"ℹ️ Вы уже зарегистрированы под этим постом!\n\n👥 Зарегистрировано участников: {len(posts_data[thread_id])}")
+            return
 
-        if target_msg.text:
-            found = re.findall(r'(@[a-zA-Z0-9_]+)', target_msg.text)
-            for u in found:
-                collected_usernames.add(u)
-
-        if message.text:
-            found_in_cmd = re.findall(r'(@[a-zA-Z0-9_]+)', message.text)
-            for u in found_in_cmd:
-                collected_usernames.add(u)
-
-        added_count = 0
-        for username in collected_usernames:
-            if username not in posts_data[thread_id]:
-                posts_data[thread_id].add(username)
-                added_count += 1
-
+        posts_data[thread_id].add(username)
         save_data()
-        
+
         total = len(posts_data[thread_id])
-        bot.reply_to(
-            message, 
-            f"✅ Сбор завершен!\n"
-            f"➕ Добавлено новых: {added_count}\n"
-            f"👥 Всего участников: {total}\n\n"
-            f"Проверить список можно командой `/list`."
-        )
+        bot.reply_to(message, f"✅ Регистрация успешна!\n\n👤 {username}\n👥 Участников: {total}")
     except Exception as e:
-        logging.error(f"Collect error: {e}")
-        bot.reply_to(message, "❌ Произошла ошибка при сборе участников.")
+        logging.error(f"Join error: {e}")
+        bot.reply_to(message, "❌ Произошла ошибка при регистрации.")
+
+@bot.message_handler(commands=['collect'])
+def admin_collect_players(message):
+    bot.reply_to(message, "⚠️ Команда больше не используется. Для регистрации игроки должны написать `/join` под постом турнира.")
 
 @bot.message_handler(commands=['add'])
 def admin_add_player(message):
@@ -282,7 +267,7 @@ def show_collected_list(message):
         participants = list(posts_data.get(thread_id, set()))
         
         if not participants:
-            bot.reply_to(message, "📭 Под этим постом/веткой еще нет собранных участников.")
+            bot.reply_to(message, "📭 Под этим постом/веткой еще нет зарегистрированных участников.")
             return
 
         participants.sort()
@@ -299,14 +284,14 @@ def send_welcome(message):
     try:
         bot.reply_to(
             message, 
-            "✅ Бот запущен (Wonti Tournament System)\n\n"
+            "✅ Бот запущен (Tournament System)\n\n"
             "👤 ИГРОКАМ:\n"
+            "• `/join` — зарегистрироваться на турнир\n"
             "• `/profile` — твой турнирный паспорт\n"
             "• `/vs` — найти текущего соперника\n"
             "• `/list` — посмотреть список участников\n"
             "• Напиши счет матча (например: `3:1`), чтобы бот засчитал его!\n\n"
             "👑 АДМИНАМ:\n"
-            "• `/collect` — собрать участников реплаем\n"
             "• `/add @user` / `/remove @user` — ручное управление\n"
             "• `/addmany` / `/removemany` — массовое управление\n"
             "• `/draw [режим]` — жеребьевка (solo/duo/trio/4v4)\n"
@@ -326,7 +311,7 @@ def make_draw(message):
         thread_id = get_thread_id(message)
         collected = list(posts_data.get(thread_id, set()))
         if not collected:
-            bot.reply_to(message, "📭 Список участников пуст. Сначала добавьте игроков.")
+            bot.reply_to(message, "📭 Список участников пуст. Сначала игроки должны зарегистрироваться через /join.")
             return
 
         args = message.text.lower().split()[1:]
@@ -610,7 +595,7 @@ def show_stats(message):
     except Exception as e: logging.error(e)
 
 if __name__ == '__main__':
-    logging.info("Старт бота на Railway (polling)...")
+    logging.info("Старт бота (polling)...")
     while True:
         try:
             bot.infinity_polling(timeout=20, long_polling_timeout=10)
