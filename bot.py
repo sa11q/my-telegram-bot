@@ -102,12 +102,12 @@ def send_welcome(message):
             return
         bot.reply_to(
             message, 
-            "✅ **Бот запущен**\n\n"
-            "• `/collect` — список собранных юзернеймов\n"
-            "• `/draw` [соло/дуо/трио/4-4] [число] — провести жеребьевку\n"
-            "• `/results` [текст] — ввести результаты матчей\n"
-            "• `/top` [число] — Elo рейтинг участников\n"
-            "• `/stats` — отдельная статистика турнира"
+            "✅ Бот запущен\n\n"
+            "• /collect — список собранных юзернеймов\n"
+            "• /draw [соло/дуо/трио/4-4] [число] — провести жеребьевку\n"
+            "• /results [текст] — ввести результаты матчей\n"
+            "• /top [число] — Elo рейтинг участников\n"
+            "• /stats — отдельная статистика турнира"
         )
     except Exception as e:
         logging.error(f"Ошибка в /start: {e}")
@@ -123,9 +123,9 @@ def collect_comments(message):
             bot.reply_to(message, "📭 Пока не найдено ни одного юзернейма.")
             return
         sorted_list = sorted(list(collected))
-        response_text = f"📋 **Собранные юзернеймы ({len(sorted_list)} шт.):**\n\n"
+        response_text = f"📋 Собранные юзернеймы ({len(sorted_list)} шт.):\n\n"
         response_text += "\n".join(f"{i+1}. {tag}" for i, tag in enumerate(sorted_list))
-        bot.reply_to(message, response_text, parse_mode="Markdown")
+        bot.reply_to(message, response_text)
     except Exception as e:
         logging.error(f"Ошибка в /collect: {e}")
 
@@ -167,7 +167,6 @@ def make_draw(message):
         team_size = team_sizes[mode]
         mode_title = mode_names[mode]
 
-        # Перемешиваем игроков
         random.shuffle(collected)
 
         total_available = len(collected)
@@ -180,14 +179,12 @@ def make_draw(message):
             bot.reply_to(message, f"⚠️ Недостаточно участников для режима {mode_title}. Нужно минимум {team_size * 2} чел.")
             return
 
-        # Находим наибольшую степень 2 (например, из 17 команд берем 16)
         playoff_teams_count = 2 ** int(math.log2(total_teams))
         players_needed = playoff_teams_count * team_size
 
         active_players = collected[:players_needed]
         reserve_players = collected[players_needed:]
 
-        # Определяем стадию турнира
         if playoff_teams_count == 2:
             stage_name = "Финал"
         elif playoff_teams_count == 4:
@@ -218,7 +215,6 @@ def make_draw(message):
                 team_members = active_players[i:i+team_size]
                 teams.append(team_members)
             
-            # Сохраняем составы в оперативку/базу
             for t_idx, team_members in enumerate(teams, 1):
                 t_name = f"Команда {t_idx}"
                 tour_stats["teams"][t_name] = team_members
@@ -248,7 +244,7 @@ def make_draw(message):
 
     except Exception as e:
         logging.error(f"Ошибка в /draw: {e}")
-        bot.reply_to(message, "❌ Ошибка при проведении жеребьевки.")
+        bot.reply_to(message, f"❌ Ошибка жеребьевки: {e}")
 
 # ================= РЕЗУЛЬТАТЫ И СЕТКА =================
 
@@ -263,7 +259,9 @@ def process_results(message):
             bot.reply_to(message, "⚠️ Вставьте результаты матчей после команды /results")
             return
 
-        blocks = text.split('\n\n')
+        # Нормализация переносов строк
+        text = text.replace('\r\n', '\n')
+        blocks = re.split(r'\n\s*\n', text)
         advancing_teams = []
         
         for block in blocks:
@@ -315,12 +313,12 @@ def process_results(message):
         save_data()
 
         if not advancing_teams:
-            bot.reply_to(message, "❌ Не удалось распознать результаты.")
+            bot.reply_to(message, "❌ Не удалось распознать результаты. Проверьте формат.")
             return
 
         random.shuffle(advancing_teams)
         
-        next_stage_text = "🏆 **СЛЕДУЮЩИЙ ЭТАП**\n\n"
+        next_stage_text = "🏆 СЛЕДУЮЩИЙ ЭТАП\n\n"
         
         for i in range(0, len(advancing_teams), 2):
             if i + 1 >= len(advancing_teams):
@@ -343,10 +341,11 @@ def process_results(message):
                 next_stage_text += f"{rosterA[j]} vs {rosterB[j]}\n"
             next_stage_text += "\n"
 
-        bot.reply_to(message, next_stage_text.strip(), parse_mode="Markdown")
+        bot.reply_to(message, next_stage_text.strip())
         
     except Exception as e:
         logging.error(f"Ошибка в /results: {e}")
+        bot.reply_to(message, f"❌ Ошибка обработки: {e}")
 
 # ================= РЕЙТИНГ ELO (МИНИМАЛИСТИЧНЫЙ) =================
 
