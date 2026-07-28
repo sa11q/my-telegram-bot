@@ -131,13 +131,19 @@ def admin_collect_players(message):
         target_msg = message.reply_to_message
         collected_usernames = set()
 
+        # 1. Собираем юзернеймы из текста самого поста, на который ответили
         if target_msg.text:
             found = re.findall(r'(@[a-zA-Z0-9_]+)', target_msg.text)
             for u in found:
                 collected_usernames.add(u)
 
+        # 2. Также всегда добавляем автора самого поста, если у него есть юзернейм
         if target_msg.from_user and target_msg.from_user.username:
             collected_usernames.add(f"@{target_msg.from_user.username}")
+
+        # 3. Добавляем автора команды (/collect), чтобы админ тоже не терялся
+        if message.from_user and message.from_user.username:
+            collected_usernames.add(f"@{message.from_user.username}")
 
         added_count = 0
         for username in collected_usernames:
