@@ -109,7 +109,7 @@ def save_data():
 db = load_data()
 
 # =====================================================================
-#  ВСПАМОГАТЕЛЬНЫЕ ФУНКЦИИ И ПРОВЕРКИ
+#  ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ И ПРОВЕРКИ
 # =====================================================================
 
 def is_group(message):
@@ -168,7 +168,6 @@ def init_player(username):
         }
 
 def recalculate_all_stats():
-    # Сброс показателей
     players = db["stats"]["players"]
     for p in players:
         players[p]["elo"] = 1000
@@ -186,7 +185,6 @@ def recalculate_all_stats():
         players[p]["biggest_loss"] = 0
         players[p]["match_history"] = []
 
-    # Сбор всех завершенных матчей
     all_matches = []
     
     for arch in db.get("archived_tournaments", []):
@@ -202,7 +200,6 @@ def recalculate_all_stats():
         if m.get("done"):
             all_matches.append(m)
 
-    # Пересчет
     for m in all_matches:
         p1, p2, s1, s2 = m["p1"], m["p2"], m["s1"], m["s2"]
         init_player(p1)
@@ -251,7 +248,7 @@ def recalculate_all_stats():
             
             p2_s["current_win_streak"] += 1
             p2_s["current_loss_streak"] = 0
-            if p2_s["current_win_streak"] > p1_s["max_win_streak"]: # note: bug fix/original logic preserved
+            if p2_s["current_win_streak"] > p1_s["max_win_streak"]:
                 p1_s["max_win_streak"] = p1_s["current_win_streak"]
         else:
             p1_s["draws"] += 1
@@ -556,9 +553,8 @@ def send_rules(message):
             "1️⃣ **Регистрация**:\n"
             "Когда администратор открывает регистрацию, просто отправьте в чат `/join` или символ `●`.\n\n"
             "2️⃣ **Отправка результатов**:\n"
-            "Результат должен отправляться STRICTLY в формате:\n"
-            "`@player1 2:3 @player2`\n"
-            "*(Результаты без упоминаний двух игроков не учитываются)*.\n\n"
+            "Результат должен отправляться в формате:\n"
+            "`@player1 2:3 @player2`\n\n"
             "3️⃣ **Подтверждение**:\n"
             "Сообщение с результатом должен написать один из участников данного матча.\n\n"
             "4️⃣ **Дедлайны**:\n"
@@ -652,7 +648,7 @@ def show_profile(message):
                 break
 
         if not actual_name:
-            return bot.reply_to(message, f"📭 Профиль для @{clean_name} не найден. Необходмо сыграть хотя бы 1 матч.")
+            return bot.reply_to(message, f"📭 Профиль для @{clean_name} не найден. Необходимо сыграть хотя бы 1 матч.")
 
         data = players[actual_name]
         diff = data['goals_scored'] - data['goals_conceded']
@@ -774,21 +770,25 @@ def show_recent(message):
 def build_admin_main_kb():
     kb = InlineKeyboardMarkup(row_width=2)
     kb.add(
-        InlineKeyboardButton("🏆 Турниры", callback_data="adm_tour"),
+        InlineKeyboardButton("🏆 Турнир", callback_data="adm_tour"),
         InlineKeyboardButton("👥 Игроки", callback_data="adm_players")
     )
     kb.add(
-        InlineKeyboardButton("⚔ Матчи", callback_data="adm_matches"),
+        InlineKeyboardButton("⚔️ Матчи", callback_data="adm_matches"),
         InlineKeyboardButton("⏰ Дедлайн", callback_data="adm_deadline")
     )
     kb.add(
-        InlineKeyboardButton("🏆 Этап", callback_data="adm_stage"),
-        InlineKeyboardButton("📊 Статистика", callback_data="adm_stats")
+        InlineKeyboardButton("📊 Статистика", callback_data="adm_stats"),
+        InlineKeyboardButton("⚙️ Настройки", callback_data="adm_settings")
     )
     kb.add(
-        InlineKeyboardButton("⚙ Настройки", callback_data="adm_settings"),
         InlineKeyboardButton("❌ Закрыть", callback_data="adm_close")
     )
+    return kb
+
+def build_admin_back_kb():
+    kb = InlineKeyboardMarkup()
+    kb.add(InlineKeyboardButton("⬅️ Назад", callback_data="adm_main"))
     return kb
 
 @bot.message_handler(commands=['admin', 'админ'])
@@ -800,12 +800,135 @@ def open_admin_panel(message):
 
         bot.send_message(
             message.chat.id,
-            "👑 **ИНТЕРАКТИВНАЯ АДМИН-ПАНЕЛЬ**\nВыберите нужный раздел управления:",
+            "👑 **АДМИН-ПАНЕЛЬ**\nВыберите нужный раздел:",
             reply_markup=build_admin_main_kb(),
             parse_mode="Markdown"
         )
     except Exception as e:
         logging.error(e)
+
+@bot.callback_query_handler(func=lambda call: call.data and call.data.startswith('adm_'))
+def handle_admin_callbacks(call):
+    if not is_admin(call.from_user.username):
+        bot.answer_callback_query(call.id, "⛔️ Доступ запрещен.", show_alert=True)
+        return
+
+    data = call.data
+    chat_id = call.message.chat.id
+    message_id = call.message.message_id
+
+    try:
+        if data == "adm_main":
+            bot.edit_message_text(
+                "👑 **АДМИН-ПАНЕЛЬ**\nВыберите нужный раздел:",
+                chat_id,
+                message_id,
+                reply_markup=build_admin_main_kb(),
+                parse_mode="Markdown"
+            )
+        elif data == "adm_tour":
+            active = db["active_tournament"]
+            reg_status = "Открыта" if active.get("registration_open") else "Закрыта"
+            text = (
+                f"🏆 **ТУРНИР**\n\n"
+                f"• Название: {active.get('title')}\n"
+                f"• Режим: {active.get('mode')}\n"
+                f"• Регистрация: {reg_status}\n"
+                f"• Участников: {len(active.get('registered_players', []))}\n"
+                f"• Этап: {active.get('stage_name')}"
+            )
+            kb = InlineKeyboardMarkup(row_width=1)
+            kb.add(
+                InlineKeyboardButton("🟢 Открыть регистрацию", callback_data="adm_tour_open"),
+                InlineKeyboardButton("🔴 Закрыть регистрацию", callback_data="adm_tour_close"),
+                InlineKeyboardButton("🔄 Переключить этап", callback_data="adm_tour_next_stage"),
+                InlineKeyboardButton("⬅️ Назад", callback_data="adm_main")
+            )
+            bot.edit_message_text(text, chat_id, message_id, reply_markup=kb, parse_mode="Markdown")
+
+        elif data == "adm_tour_open":
+            db["active_tournament"]["registration_open"] = True
+            save_data()
+            bot.answer_callback_query(call.id, "🟢 Регистрация открыта!")
+            call.data = "adm_tour"
+            handle_admin_callbacks(call)
+
+        elif data == "adm_tour_close":
+            db["active_tournament"]["registration_open"] = False
+            save_data()
+            bot.answer_callback_query(call.id, "🔴 Регистрация закрыта!")
+            call.data = "adm_tour"
+            handle_admin_callbacks(call)
+
+        elif data == "adm_tour_next_stage":
+            success, msg = advance_stage(chat_id)
+            bot.answer_callback_query(call.id, "🔄 Этап обновлен!")
+            bot.edit_message_text(f"🔄 **Результат перехода этапа:**\n\n{msg}", chat_id, message_id, reply_markup=build_admin_back_kb(), parse_mode="Markdown")
+
+        elif data == "adm_players":
+            players = db["stats"]["players"]
+            text = f"👥 **ИГРОКИ**\n\nВсего в базе: {len(players)} игроков."
+            bot.edit_message_text(text, chat_id, message_id, reply_markup=build_admin_back_kb(), parse_mode="Markdown")
+
+        elif data == "adm_matches":
+            active = db["active_tournament"]
+            matches = active.get("matches", [])
+            text = f"⚔️ **МАТЧИ**\n\nАктивных матчей: {len(matches)}"
+            bot.edit_message_text(text, chat_id, message_id, reply_markup=build_admin_back_kb(), parse_mode="Markdown")
+
+        elif data == "adm_deadline":
+            active = db["active_tournament"]
+            dl = active.get("deadline") or "Не установлен"
+            text = f"⏰ **ДЕДЛАЙН**\n\nТекущий дедлайн: {dl}"
+            kb = InlineKeyboardMarkup(row_width=1)
+            kb.add(
+                InlineKeyboardButton("🕒 Установить авто-дедлайн (+1.5ч)", callback_data="adm_dl_auto"),
+                InlineKeyboardButton("❌ Сбросить дедлайн", callback_data="adm_dl_clear"),
+                InlineKeyboardButton("⬅️ Назад", callback_data="adm_main")
+            )
+            bot.edit_message_text(text, chat_id, message_id, reply_markup=kb, parse_mode="Markdown")
+
+        elif data == "adm_dl_auto":
+            db["active_tournament"]["deadline"] = calculate_auto_deadline()
+            db["active_tournament"]["reminder_sent"] = False
+            save_data()
+            bot.answer_callback_query(call.id, "⏰ Авто-дедлайн установлен!")
+            call.data = "adm_deadline"
+            handle_admin_callbacks(call)
+
+        elif data == "adm_dl_clear":
+            db["active_tournament"]["deadline"] = None
+            save_data()
+            bot.answer_callback_query(call.id, "❌ Дедлайн сброшен!")
+            call.data = "adm_deadline"
+            handle_admin_callbacks(call)
+
+        elif data == "adm_stats":
+            players = db["stats"]["players"]
+            text = f"📊 **СТАТИСТИКА**\n\nЗаписано игроков: {len(players)}\nВсего турниров в архиве: {len(db.get('archived_tournaments', []))}"
+            kb = InlineKeyboardMarkup(row_width=1)
+            kb.add(
+                InlineKeyboardButton("🔄 Пересчитать всю статистику", callback_data="adm_recalc"),
+                InlineKeyboardButton("⬅️ Назад", callback_data="adm_main")
+            )
+            bot.edit_message_text(text, chat_id, message_id, reply_markup=kb, parse_mode="Markdown")
+
+        elif data == "adm_recalc":
+            recalculate_all_stats()
+            save_data()
+            bot.answer_callback_query(call.id, "🔄 Статистика пересчитана!")
+            call.data = "adm_stats"
+            handle_admin_callbacks(call)
+
+        elif data == "adm_settings":
+            admins = db["settings"]["admins"]
+            text = f"⚙️ **НАСТРОЙКИ**\n\nАдминистраторы: {', '.join(admins)}"
+            bot.edit_message_text(text, chat_id, message_id, reply_markup=build_admin_back_kb(), parse_mode="Markdown")
+
+        elif data == "adm_close":
+            bot.delete_message(chat_id, message_id)
+    except Exception as e:
+        logging.error(f"Admin callback error: {e}")
 
 # =====================================================================
 #  ПОДКЛЮЧЕНИЕ ВНЕШНИХ МОДУЛЕЙ И ТОЧКА ВХОДА
