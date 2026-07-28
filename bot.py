@@ -5,6 +5,7 @@ import re
 import json
 import random
 import math
+import time
 
 # 1. Логирование
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -113,6 +114,8 @@ def process_match_result(p1, p2, s1, s2):
             return True
     return False
 
+# ==================== УПРАВЛЕНИЕ СПИСКОМ (СБОР) ====================
+
 @bot.message_handler(commands=['collect'])
 def admin_collect_players(message):
     try:
@@ -131,26 +134,15 @@ def admin_collect_players(message):
         target_msg = message.reply_to_message
         collected_usernames = set()
 
-        # Ищем все сообщения, которые бот успел зафиксировать в памяти как ответы на этот же пост,
-        # ИЛИ собираем юзернеймов из текста самих комментариев-реплаев, которые присылают участники.
-        # Чтобы бот гарантированно видел комментарии, участники могут писать свои никнеймы 
-        # или бот автоматически записывает тех, кто пишет в этот тред.
-        
-        # Основной сбор: если участник написал комментарий реплаем на пост или указал юзернейм в ответ
-        # (Бот сохраняет участников из текстов сообщений, отправленных в ответ на этот пост, 
-        # либо мы берем юзернейм автора каждого комментария, оставившего заявку).
-        
-        # Для максимальной точности: если бот подключен как администратор группы и видит чат,
-        # он может собирать всех, кто отправлял сообщения в ответ на целевой пост.
-        # Сделаем сбор из базы сообщений треда или текста команды:
+        if target_msg.text:
+            found = re.findall(r'(@[a-zA-Z0-9_]+)', target_msg.text)
+            for u in found:
+                collected_usernames.add(u)
+
         if message.text:
             found_in_cmd = re.findall(r'(@[a-zA-Z0-9_]+)', message.text)
             for u in found_in_cmd:
                 collected_usernames.add(u)
-
-        # Дополнительно: проверяем, сохраняли ли мы авто-ответы в этот тред ранее
-        # (Каждый раз, когда пользователь пишет в чат, мы можем фиксировать его активность, 
-        # но для точечного сбора лучше всего работает отправка списка или комментарии).
 
         added_count = 0
         for username in collected_usernames:
@@ -163,7 +155,7 @@ def admin_collect_players(message):
         total = len(posts_data[thread_id])
         bot.reply_to(
             message, 
-            f"✅ Сбор из комментариев завершен!\n"
+            f"✅ Сбор завершен!\n"
             f"➕ Добавлено новых: {added_count}\n"
             f"👥 Всего участников: {total}\n\n"
             f"Проверить список можно командой `/list`."
@@ -172,6 +164,117 @@ def admin_collect_players(message):
         logging.error(f"Collect error: {e}")
         bot.reply_to(message, "❌ Произошла ошибка при сборе участников.")
 
+@bot.message_handler(commands=['add'])
+def admin_add_player(message):
+    try:
+        if not is_admin(message): return
+        args = message.text.split()
+        if len(args) < 2:
+            return bot.reply_to(message, "⚠️ Укажите никнейм. Пример: `/add @username`")
+        
+        username = args[1]
+        if not username.startswith('@'): username = '@' + username
+
+        thread_id = get_thread_id(message)
+        if thread_id not in posts_data: posts_data[thread_id] = set()
+
+        if username in posts_data[thread_id]:
+            bot.reply_to(message, f"ℹ️ Игрок {username} уже есть в списке.")
+        else:
+            posts_data[thread_id].add(username)
+            save_data()
+            bot.reply_to(message, f"✅ Добавлен: {username}\n👥 Всего в списке: {len(posts_data[thread_id])}")
+    except Exception as e:
+        logging.error(e)
+
+@bot.message_handler(commands=['remove', 'del'])
+def admin_remove_player(message):
+    try:
+        if not is_admin(message): return
+        args = message.text.split()
+        if len(args) < 2:
+            return bot.reply_to(message, "⚠️ Укажите никнейм. Пример: `/remove @username`")
+        
+        username = args[1]
+        if not username.startswith('@'): username = '@' + username
+
+        thread_id = get_thread_id(message)
+        if thread_id in posts_data and username in posts_data[thread_id]:
+            posts_data[thread_id].remove(username)
+            save_data()
+            bot.reply_to(message, f"🗑 Удален: {username}\n👥 Всего в списке: {len(posts_data[thread_id])}")
+        else:
+            bot.reply_to(message, f"❌ Игрок {username} не найден в списке.")
+    except Exception as e:
+        logging.error(e)
+
+@bot.message_handler(commands=['addmany', 'addall'])
+def admin_add_many_players(message):
+    try:
+        if not is_admin(message): return
+        text = message.text.replace('/addmany', '').replace('/addall', '').strip()
+        if not text:
+            return bot.reply_to(message, "⚠️ Перечислите юзернеймы.\nПример: `/addmany @user1 @user2 @user3`")
+        
+        found_usernames = re.findall(r'(@[a-zA-Z0-9_]+)', text)
+        if not found_usernames:
+            return bot.reply_to(message, "❌ Не найдено ни одного юзернейма с символом `@`.")
+
+        thread_id = get_thread_id(message)
+        if thread_id not in posts_data: posts_data[thread_id] = set()
+
+        added_count = 0
+        for username in found_usernames:
+            if username not in posts_data[thread_id]:
+                posts_data[thread_id].add(username)
+                added_count += 1
+
+        save_data()
+        bot.reply_to(
+            message, 
+            f"✅ Массовое добавление завершено!\n"
+            f"➕ Добавлено новых: {added_count}\n"
+            f"👥 Всего участников в списке: {len(posts_data[thread_id])}"
+        )
+    except Exception as e:
+        logging.error(e)
+        bot.reply_to(message, "❌ Ошибка при массовом добавлении.")
+
+@bot.message_handler(commands=['removemany', 'delmany'])
+def admin_remove_many_players(message):
+    try:
+        if not is_admin(message): return
+        text = message.text.replace('/removemany', '').replace('/delmany', '').strip()
+        if not text:
+            return bot.reply_to(message, "⚠️ Перечислите юзернеймы для удаления.\nПример: `/removemany @user1 @user2`")
+        
+        found_usernames = re.findall(r'(@[a-zA-Z0-9_]+)', text)
+        if not found_usernames:
+            return bot.reply_to(message, "❌ Не найдено ни одного юзернейма с символом `@`.")
+
+        thread_id = get_thread_id(message)
+        if thread_id not in posts_data:
+            return bot.reply_to(message, "📭 Список участников пуст.")
+
+        removed_count = 0
+        for username in found_usernames:
+            if username in posts_data[thread_id]:
+                posts_data[thread_id].remove(username)
+                removed_count += 1
+
+        save_data()
+        bot.reply_to(
+            message, 
+            f"🗑 Массовое удаление завершено!\n"
+            f"➖ Удалено: {removed_count}\n"
+            f"👥 Осталось в списке: {len(posts_data[thread_id])}"
+        )
+    except Exception as e:
+        logging.error(e)
+        bot.reply_to(message, "❌ Ошибка при массовом удалении.")
+
+# ==================== ОСНОВНЫЕ КОМАНДЫ ====================
+
 @bot.message_handler(commands=['list', 'players', 'участники'])
 def show_collected_list(message):
     try:
@@ -179,7 +282,7 @@ def show_collected_list(message):
         participants = list(posts_data.get(thread_id, set()))
         
         if not participants:
-            bot.reply_to(message, "📭 Под этим постом/веткой еще нет собранных участников. Админ должен использовать `/collect` в ответ на пост.")
+            bot.reply_to(message, "📭 Под этим постом/веткой еще нет собранных участников.")
             return
 
         participants.sort()
@@ -196,18 +299,20 @@ def send_welcome(message):
     try:
         bot.reply_to(
             message, 
-            "✅ Бот запущен (Railway Tournament System)\n\n"
+            "✅ Бот запущен (Wonti Tournament System)\n\n"
             "👤 ИГРОКАМ:\n"
             "• `/profile` — твой турнирный паспорт\n"
             "• `/vs` — найти текущего соперника\n"
             "• `/list` — посмотреть список участников\n"
             "• Напиши счет матча (например: `3:1`), чтобы бот засчитал его!\n\n"
             "👑 АДМИНАМ:\n"
-            "• `/collect` (реплаем на пост) — собрать юзернеймы из комментариев\n"
-            "• `/draw [режим]` — сделать жеребьевку (соло/дуо/трио/4-4)\n"
-            "• `/results [текст]` — прописать счета вручную\n"
-            "• `/next` — перейти к следующему этапу плей-офф\n"
-            "• `/tp @username` — тех. поражение (0:6)\n"
+            "• `/collect` — собрать участников реплаем\n"
+            "• `/add @user` / `/remove @user` — ручное управление\n"
+            "• `/addmany` / `/removemany` — массовое управление\n"
+            "• `/draw [режим]` — жеребьевка (solo/duo/trio/4v4)\n"
+            "• `/results [текст]` — прописать счета\n"
+            "• `/next` — следующий этап\n"
+            "• `/tp @username` — тех. поражение\n"
             "• `/top` и `/stats` — статистика\n"
         )
     except Exception as e:
@@ -221,7 +326,7 @@ def make_draw(message):
         thread_id = get_thread_id(message)
         collected = list(posts_data.get(thread_id, set()))
         if not collected:
-            bot.reply_to(message, "📭 Список участников пуст. Сначала админ должен ответить на пост командой `/collect`.")
+            bot.reply_to(message, "📭 Список участников пуст. Сначала добавьте игроков.")
             return
 
         args = message.text.lower().split()[1:]
