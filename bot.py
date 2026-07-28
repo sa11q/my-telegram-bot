@@ -81,26 +81,39 @@ def init_player(username):
             "elo": 1000, "goals_scored": 0, "goals_conceded": 0, "matches": 0
         }
 
-def process_active_match(m, s1, s2):
-    m["s1"], m["s2"], m["done"] = s1, s2, True
-    p1, p2 = m["p1"], m["p2"]
-    init_player(p1)
-    init_player(p2)
-    
-    name1, name2 = p1.replace('@', ''), p2.replace('@', '')
-    
-    tour_stats["players"][name1]["goals_scored"] += s1
-    tour_stats["players"][name1]["goals_conceded"] += s2
-    tour_stats["players"][name1]["matches"] += 1
-    
-    tour_stats["players"][name2]["goals_scored"] += s2
-    tour_stats["players"][name2]["goals_conceded"] += s1
-    tour_stats["players"][name2]["matches"] += 1
-    
-    old_r1 = tour_stats["players"][name1]["elo"]
-    old_r2 = tour_stats["players"][name2]["elo"]
-    tour_stats["players"][name1]["elo"], tour_stats["players"][name2]["elo"] = calculate_elo(old_r1, old_r2, s1, s2)
-    save_data()
+def process_match_result(p1, p2, s1, s2):
+    """Единая функция обновления статистики матча между игроками в активной сетке"""
+    for m in active_tour["matches"]:
+        # Ищем совпадение по игрокам (в любом порядке)
+        match_p1 = m["p1"].replace('@', '').lower()
+        match_p2 = m["p2"].replace('@', '').lower()
+        target_p1 = p1.replace('@', '').lower()
+        target_p2 = p2.replace('@', '').lower()
+
+        if (match_p1 == target_p1 and match_p2 == target_p2) or (match_p1 == target_p2 and match_p2 == target_p1):
+            if match_p1 == target_p2: # если порядок поменяли местами, свапаем счета
+                s1, s2 = s2, s1
+            
+            m["s1"], m["s2"], m["done"] = s1, s2, True
+            
+            init_player(m["p1"])
+            init_player(m["p2"])
+            name1, name2 = m["p1"].replace('@', ''), m["p2"].replace('@', '')
+            
+            tour_stats["players"][name1]["goals_scored"] += s1
+            tour_stats["players"][name1]["goals_conceded"] += s2
+            tour_stats["players"][name1]["matches"] += 1
+            
+            tour_stats["players"][name2]["goals_scored"] += s2
+            tour_stats["players"][name2]["goals_conceded"] += s1
+            tour_stats["players"][name2]["matches"] += 1
+            
+            old_r1 = tour_stats["players"][name1]["elo"]
+            old_r2 = tour_stats["players"][name2]["elo"]
+            tour_stats["players"][name1]["elo"], tour_stats["players"][name2]["elo"] = calculate_elo(old_r1, old_r2, s1, s2)
+            save_data()
+            return True
+    return False
 
 # ================= КОМАНДЫ БОТА =================
 
@@ -111,14 +124,15 @@ def send_welcome(message):
             message, 
             "✅ Бот запущен (Active Tournament Engine)\n\n"
             "👤 ИГРОКАМ:\n"
-            "• /profile — твой турнирный паспорт\n"
-            "• /vs — найти своего текущего соперника\n"
+            "• `/profile` — твой турнирный паспорт\n"
+            "• `/vs` — найти своего текущего соперника\n"
             "• Напиши счет (например: 3:1), чтобы бот его засчитал!\n\n"
             "👑 АДМИНАМ:\n"
-            "• /draw [режим] — создать сетку (соло/дуо/трио/4-4)\n"
-            "• /next — завершить этап и создать новую сетку победителей\n"
-            "• /tp @username — дать тех. поражение 6:0\n"
-            "• /top и /stats — статистика\n"
+            "• `/draw [режим]` — создать сетку (соло/дуо/трио/4-4)\n"
+            "• `/results [текст]` — принудительно ввести/исправить счета матчей\n"
+            "• `/next` — завершить этап и создать новую сетку победителей\n"
+            "• `/tp @username` — дать тех. поражение 6:0\n"
+            "• `/top` и `/stats` — статистика\n"
         )
     except Exception as e:
         logging.error(e)
@@ -202,6 +216,33 @@ def make_draw(message):
     except Exception as e:
         logging.error(f"Draw error: {e}")
 
+# ================= РУЧНОЙ ВВОД РЕЗУЛЬТАТОВ АДМИНОМ (/results) =================
+
+@bot.message_handler(commands=['results'])
+def process_admin_results(message):
+    try:
+        if not is_admin(message): return
+        text = message.text.replace('/results', '').strip()
+        if not text:
+            bot.reply_to(message, "⚠️ Введите результаты после команды /results\nПример:\n@player1 3:1 @player2")
+            return
+
+        # Ищем все пары вида @user1 СЧЕТ:СЧЕТ @user2
+        matches_found = re.findall(r'(@[a-zA-Z0-9_]+)\s*(\d+)\s*:\s*(\d+)\s*(@[a-zA-Z0-9_]+)', text)
+        if not matches_found:
+            bot.reply_to(message, "❌ Не удалось распознать формат. Пример: @user1 3:1 @user2")
+            return
+
+        success_count = 0
+        for p1, s1, s2, p2 in matches_found:
+            if process_match_result(p1, p2, int(s1), int(s2)):
+                success_count += 1
+
+        bot.reply_to(message, f"✅ Успешно обновлено результатов матчей: {success_count}")
+    except Exception as e:
+        logging.error(f"Results error: {e}")
+        bot.reply_to(message, "❌ Ошибка при обработке результатов.")
+
 # ================= ДВИЖЕНИЕ ПО СЕТКЕ =================
 
 @bot.message_handler(commands=['next'])
@@ -276,7 +317,7 @@ def next_stage(message):
     except Exception as e:
         logging.error(e)
 
-# ================= АВТОМАТИЧЕСКИЙ РЕГИСТРАТОР СЧЕТА =================
+# ================= АВТОМАТИЧЕСКИЙ РЕГИСТРАТОР СЧЕТА (ОТ ИГРОКОВ) =================
 
 @bot.message_handler(func=lambda m: bool(re.search(r'\b(\d+)\s*:\s*(\d+)\b', str(m.text))))
 def auto_score(message):
@@ -295,11 +336,11 @@ def auto_score(message):
                 sc1, sc2 = int(score_match.group(1)), int(score_match.group(2))
 
                 if p1_clean == clean_user:
-                    process_active_match(m, sc1, sc2)
+                    process_match_result(m["p1"], m["p2"], sc1, sc2)
                     bot.reply_to(message, f"✅ Итог принят: {m['p1']} {sc1}:{sc2} {m['p2']}")
                     return
                 elif p2_clean == clean_user:
-                    process_active_match(m, sc2, sc1)
+                    process_match_result(m["p1"], m["p2"], sc2, sc1) # меняем местами, так как писал второй игрок
                     bot.reply_to(message, f"✅ Итог принят: {m['p1']} {sc2}:{sc1} {m['p2']}")
                     return
     except Exception as e:
@@ -365,11 +406,11 @@ def tech_defeat(message):
     for m in active_tour["matches"]:
         if not m["done"]:
             if m["p1"].replace('@', '').lower() == target:
-                process_active_match(m, 0, 6)
+                process_match_result(m["p1"], m["p2"], 0, 6)
                 bot.reply_to(message, f"🔨 Тех. поражение. {m['p1']} 0:6 {m['p2']}")
                 return
             elif m["p2"].replace('@', '').lower() == target:
-                process_active_match(m, 6, 0)
+                process_match_result(m["p1"], m["p2"], 6, 0)
                 bot.reply_to(message, f"🔨 Тех. поражение. {m['p1']} 6:0 {m['p2']}")
                 return
     bot.reply_to(message, "📭 Активный матч для этого игрока не найден.")
